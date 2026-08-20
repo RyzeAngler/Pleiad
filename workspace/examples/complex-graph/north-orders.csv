@@ -1,0 +1,5 @@
+order_id,region,amount,status
+N-1001,north,128.50,completed
+N-1002,north,96.00,completed
+N-1003,north,-15.00,refunded
+SHARED-01,north,220.00,completed

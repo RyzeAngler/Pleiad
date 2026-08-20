@@ -1,0 +1,171 @@
+Screen {
+    background: #080C12;
+    color: #D8E1EC;
+}
+
+MainScreen {
+    width: 100%;
+    height: 100%;
+}
+
+#header {
+    height: 4;
+    width: 100%;
+    padding: 0 2;
+    border-bottom: solid #263342;
+}
+
+#workspace {
+    height: 1fr;
+    width: 100%;
+    layout: horizontal;
+}
+
+#conversation-pane {
+    width: 2fr;
+    min-width: 70;
+    height: 100%;
+    border-right: solid #263342;
+}
+
+#conversation-header {
+    height: 2;
+    padding: 0 2;
+    color: #66C8F2;
+}
+
+#conversation-log {
+    height: 1fr;
+    padding: 0 2;
+    background: #0B1119;
+    scrollbar-color: #263342;
+    scrollbar-color-hover: #3E9CB5;
+}
+
+#process-pane {
+    height: 9;
+    min-height: 9;
+    max-height: 9;
+    border-top: solid #263342;
+    background: #080C12;
+}
+
+#process-header {
+    height: 2;
+    padding: 0 2;
+    color: #F0B84B;
+    background: #080C12;
+}
+
+#process-log {
+    height: 1fr;
+    padding: 0 2;
+    background: #0B1119;
+    scrollbar-color: #263342;
+    scrollbar-color-hover: #3E9CB5;
+}
+
+#runtime-pane {
+    width: 1fr;
+    min-width: 36;
+    height: 100%;
+}
+
+#runtime-tabs {
+    height: 2;
+    background: #080C12;
+}
+
+#runtime-scroll {
+    height: 1fr;
+    padding: 1 2;
+    background: #0B1119;
+    scrollbar-color: #263342;
+}
+
+#runtime-body {
+    width: 100%;
+}
+
+#latest-event {
+    height: 9;
+    padding: 1 2;
+    border-top: solid #263342;
+    background: #0B1119;
+}
+
+#composer {
+    height: 3;
+    width: 100%;
+    padding: 0 1;
+    border: solid #3E9CB5;
+    background: #0D151F;
+}
+
+#composer-label {
+    width: 9;
+    height: 1;
+    padding: 0 0 0 1;
+    color: #B59AF4;
+}
+
+#composer-input {
+    width: 1fr;
+    border: none;
+    background: transparent;
+}
+
+#composer-hint {
+    width: 16;
+    height: 1;
+    padding: 0 1 0 0;
+    color: #788899;
+    text-align: right;
+}
+
+#footer {
+    height: 2;
+    width: 100%;
+    padding: 0 2;
+    color: #9AA9BB;
+    background: #080C12;
+}
+
+MainScreen.narrow #runtime-pane {
+    display: none;
+}
+
+MainScreen.narrow #conversation-pane {
+    width: 1fr;
+}
+
+MainScreen.narrow.runtime-visible #conversation-pane {
+    display: none;
+}
+
+MainScreen.narrow.runtime-visible #runtime-pane {
+    display: block;
+    width: 1fr;
+    min-width: 0;
+}
+
+#help-title,
+#trace-title {
+    height: 3;
+    padding: 1 2;
+    color: #66C8F2;
+    border-bottom: solid #263342;
+}
+
+#help-body,
+#trace-log {
+    height: 1fr;
+    padding: 1 2;
+    background: #0B1119;
+}
+
+#trace-screen {
+    width: 100%;
+    height: 100%;
+    background: #080C12;
+}

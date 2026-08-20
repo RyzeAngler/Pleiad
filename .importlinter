@@ -1,0 +1,72 @@
+[importlinter]
+root_packages =
+    pleiad
+
+[importlinter:llm_is_boundary]
+name = LLM stays below orchestration
+type = forbidden
+source_modules =
+    pleiad.llm
+forbidden_modules =
+    pleiad.tools
+    pleiad.skills
+    pleiad.memory
+    pleiad.agent
+    pleiad.graph
+    pleiad.runtime
+    pleiad.storage
+    pleiad.application
+    pleiad.entrypoints
+
+[importlinter:tools_is_standalone]
+name = Tools stay independent from orchestration
+type = forbidden
+source_modules =
+    pleiad.tools
+forbidden_modules =
+    pleiad.skills
+    pleiad.memory
+    pleiad.agent
+    pleiad.graph
+    pleiad.runtime
+    pleiad.storage
+    pleiad.application
+    pleiad.entrypoints
+
+[importlinter:skills_are_prompt_assets]
+name = Skills stay independent from execution
+type = forbidden
+source_modules =
+    pleiad.skills
+forbidden_modules =
+    pleiad.tools
+    pleiad.memory
+    pleiad.agent
+    pleiad.graph
+    pleiad.runtime
+    pleiad.storage
+    pleiad.application
+    pleiad.entrypoints
+
+[importlinter:graph_is_definition]
+name = Graph definitions do not execute Agents
+type = forbidden
+source_modules =
+    pleiad.graph
+forbidden_modules =
+    pleiad.agent
+    pleiad.runtime
+    pleiad.application
+    pleiad.entrypoints
+
+[importlinter:memory_is_standalone]
+name = Memory stays independent from execution
+type = forbidden
+source_modules =
+    pleiad.memory
+forbidden_modules =
+    pleiad.agent
+    pleiad.graph
+    pleiad.runtime
+    pleiad.application
+    pleiad.entrypoints

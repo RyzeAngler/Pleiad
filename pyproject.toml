@@ -1,0 +1,96 @@
+[build-system]
+requires = ["uv_build>=0.11.0,<0.12.0"]
+build-backend = "uv_build"
+
+[project]
+name = "pleiad"
+version = "0.1.0"
+description = "A controlled runtime for dynamically generated Agent DAGs."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = [
+    "anthropic>=0.67.0,<1.0.0",
+    "httpx[socks]>=0.28.1,<1.0.0",
+    "jsonschema>=4.25.0,<5.0.0",
+    "openai>=2.0.0,<3.0.0",
+    "pydantic>=2.12.0,<3.0.0",
+    "pydantic-settings>=2.10.0,<3.0.0",
+    "pyyaml>=6.0.3,<7.0.0",
+    "textual>=0.60.0,<1.0.0",
+    "typer>=0.16.0,<1.0.0",
+    "fastapi>=0.116.0,<1.0.0",
+    "loguru>=0.7.3,<1.0.0",
+    "uvicorn[standard]>=0.35.0,<1.0.0",
+]
+
+[project.scripts]
+pleiad = "pleiad.cli:app"
+
+[dependency-groups]
+dev = [
+    "import-linter>=2.3.0,<3.0.0",
+    "mypy>=1.17.0,<2.0.0",
+    "pytest>=8.4.0,<9.0.0",
+    "pre-commit>=4.3.0,<5.0.0",
+    "ruff>=0.12.0,<1.0.0",
+    "types-jsonschema>=4.25.0,<5.0.0",
+    "types-PyYAML>=6.0.12.20250516,<7.0.0",
+]
+
+[tool.mypy]
+files = ["src"]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+warn_unused_ignores = true
+enable_error_code = ["possibly-undefined", "redundant-expr", "truthy-bool"]
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["hypothesis.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["fastapi", "fastapi.*"]
+ignore_missing_imports = true
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "ANN",
+    "ASYNC",
+    "B",
+    "C4",
+    "D",
+    "E",
+    "F",
+    "I",
+    "RUF",
+    "S",
+    "SIM",
+    "UP",
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["D", "S101"]
+"**/__init__.py" = ["D104"]
+"src/pleiad/**/*.py" = ["D"]
+"src/pleiad/tui/**/*.py" = ["D", "RUF001"]
+"src/pleiad/agent/prompt.py" = ["RUF001"]
+"src/pleiad/errors/catalog.py" = ["RUF001"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
