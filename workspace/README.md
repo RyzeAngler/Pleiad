@@ -1,25 +1,23 @@
 # 默认工作区
 
-默认工作区只保存能力目录、静态技能和运行时数据：
-
 ```text
 workspace/
-├── capabilities.yaml       # Tool 和 Skill 的 name/code/description
-├── tools/                  # 自定义 BaseTool 实现和固定注册入口
-├── skills/                 # 静态 SKILL.md 内容，包含 Tool 开发流程
+├── capabilities.yaml       # Tool / Skill 的 name、code、description
+├── tools/                  # Python JSON stdin/stdout 脚本与同名 JSON 绑定
+├── skills/                 # 带标准 frontmatter 的 Skill 包
 └── runtime/
-    ├── logs/               # 按日期保存的日志，单文件 10 MB，最多保留 7 天
-    ├── traces/             # 全链路追踪
-    ├── executions/         # 执行摘要
-    ├── graphs/             # 任务图版本
-    ├── graph-runs/         # 任务图运行记录
-    ├── node-runs/          # 节点运行记录
-    ├── artifacts/          # 节点结构化输出
-    └── memory/             # 会话上下文
+    ├── executions/         # Execution 与顺序事件的 SQLite journal
+    ├── graphs/             # 不可变图版本
+    ├── graph-runs/         # 图执行产品记录
+    ├── node-runs/          # 节点尝试记录与 SDK Run 关联
+    ├── artifacts/          # 节点 JSON 结果
+    ├── memory/             # SDK ShortMemory SQLite 与授权事实 JSONL
+    ├── scratch/            # 容器命令和 Skill 生成的临时产物
+    └── logs/               # 按大小轮转的程序日志
 ```
 
-全局模型配置位于仓库根目录的 `.env`，不写入能力 YAML。数据库地址、接口地址、凭据和连接状态属于 Tool 实现，也不写入能力 YAML。Skill 只提供静态提示词内容，不支持运行中连接配置。
+模型配置与固定 OCI 镜像位于宿主 `.env`，不进入能力 YAML。每个 Execution、能力搜索和图绑定都会读取当前能力目录，无需重启。运行中的 SDK Run 保持已选择的引用集合。
 
-自定义 Tool 的实现放在 `tools/`，由 `tools/__init__.py` 中的 `register_tools` 建立稳定 `code` 与 Tool 工厂的绑定，再在 `capabilities.yaml` 中发布同一 `code` 的三字段元数据。Runtime 会在每轮请求前检查变化并热加载最新的有效目录。完整流程见 [自定义 Tool 开发指南](../docs/custom-tools.md)。
+自定义 Tool 的脚本通过 JSON stdin/stdout 交互，`tools/<name>.json` 声明 script、input_schema 和 output_schema。Skill 脚本直接使用 Pleiad command 执行。示例见 [脚本](tools/text_statistics.py) 和 [JSON 绑定](tools/text_statistics.json)，能力的架构职责见 [Weave 架构设计](../docs/weave-architecture.md#4-组件视图c3)。
 
-`runtime/` 中的内容由本地运行自动生成，Git 只保留各目录的 `.gitkeep` 占位文件。
+运行数据不会打包到 Weave 发行物。OpenTelemetry spans 由宿主显式提供的 exporter 导出，事件 journal 和 SDK ShortMemory 都不承担 Trace 存储职责。

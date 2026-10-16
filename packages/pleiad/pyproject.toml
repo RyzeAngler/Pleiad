@@ -1,0 +1,149 @@
+[build-system]
+requires = ["setuptools==84.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pleiad"
+version = "0.1.0"
+description = "A provider-neutral runtime for building and executing Agents."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = [
+    "jsonschema>=4.25.0,<5.0.0",
+    "opentelemetry-api>=1.44.0,<2.0.0",
+    "pydantic>=2.12.0,<3.0.0",
+    "pyyaml>=6.0.3,<7.0.0",
+]
+
+[project.urls]
+Source = "https://github.com/RyzeAngler/Pleiad"
+Issues = "https://github.com/RyzeAngler/Pleiad/issues"
+
+[project.optional-dependencies]
+openai = [
+    "httpx[socks]>=0.28.1,<1.0.0",
+    "openai>=2.0.0,<3.0.0",
+]
+anthropic = [
+    "anthropic>=0.67.0,<1.0.0",
+]
+glm = [
+    "anthropic>=0.67.0,<1.0.0",
+    "zai-sdk>=0.2.3,<0.3.0",
+]
+qwen = [
+    "aiohttp>=3.9.0,<4.0.0",
+    "anthropic>=0.67.0,<1.0.0",
+    "dashscope>=1.27.4,<2.0.0",
+]
+kimi = [
+    "anthropic>=0.67.0,<1.0.0",
+    "openai>=2.0.0,<3.0.0",
+]
+deepseek = [
+    "anthropic>=0.67.0,<1.0.0",
+    "openai>=2.0.0,<3.0.0",
+]
+minimax = [
+    "anthropic>=0.67.0,<1.0.0",
+    "openai>=2.0.0,<3.0.0",
+]
+models = [
+    "aiohttp>=3.9.0,<4.0.0",
+    "anthropic>=0.67.0,<1.0.0",
+    "dashscope>=1.27.4,<2.0.0",
+    "httpx[socks]>=0.28.1,<1.0.0",
+    "openai>=2.0.0,<3.0.0",
+    "zai-sdk>=0.2.3,<0.3.0",
+]
+mcp = [
+    "fastmcp>=4.0.4,<5.0.0",
+]
+observability = [
+    "langfuse>=4.15.4,<5.0.0",
+    "opentelemetry-sdk>=1.44.0,<2.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "anthropic>=0.67.0,<1.0.0",
+    "aiohttp>=3.9.0,<4.0.0",
+    "dashscope>=1.27.4,<2.0.0",
+    "httpx[socks]>=0.28.1,<1.0.0",
+    "fastmcp>=4.0.4,<5.0.0",
+    "langfuse>=4.15.4,<5.0.0",
+    "mypy>=1.17.0,<2.0.0",
+    "openai>=2.0.0,<3.0.0",
+    "opentelemetry-sdk>=1.44.0,<2.0.0",
+    "pytest>=8.4.0,<9.0.0",
+    "ruff==0.15.22",
+    "types-jsonschema>=4.25.0,<5.0.0",
+    "types-PyYAML>=6.0.12.20250516,<7.0.0",
+    "zai-sdk>=0.2.3,<0.3.0",
+]
+
+[tool.setuptools]
+include-package-data = false
+
+[tool.setuptools.package-dir]
+pleiad = "src"
+
+[tool.setuptools.package-data]
+pleiad = ["py.typed"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["ANN", "ASYNC", "B", "C4", "D", "E", "F", "I", "RUF", "S", "SIM", "UP"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["D", "S101"]
+"**/tests/**/*.py" = ["D", "S101"]
+"**/__init__.py" = ["D104"]
+"src/**/*.py" = ["D"]
+"src/agent/prompt.py" = ["RUF001"]
+"src/errors/catalog.py" = ["RUF001"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.isort]
+known-first-party = ["pleiad"]
+
+[tool.mypy]
+packages = ["pleiad", "tests"]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+warn_unused_ignores = true
+enable_error_code = ["possibly-undefined", "redundant-expr", "truthy-bool"]
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+addopts = "--strict-markers"
+testpaths = ["tests"]
+markers = [
+    "unit: fast SDK unit tests",
+    "contract: public protocol and architecture contract tests",
+    "integration: fake-model or local integration tests",
+    "oci: tests requiring an OCI runtime",
+    "packaging: fresh distribution build and clean-install tests",
+    "provider_e2e: tests requiring a real model provider",
+]
+
+[tool.uv]
+config-settings-package.pleiad = { editable_mode = "strict" }
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "README.md" },
+    { file = "LICENSE" },
+    { file = "src/**/*.py" },
+    { file = "src/py.typed" },
+]

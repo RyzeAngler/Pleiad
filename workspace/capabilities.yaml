@@ -1,27 +1,14 @@
 tools:
-  - name: read
-    code: pleiad.tool.read
-    description: 读取工作区中的文件内容
-  - name: write
-    code: pleiad.tool.write
-    description: 写入工作区中的文件内容
-  - name: bash
-    code: pleiad.tool.bash
-    description: 在工作区中执行受控 Bash 命令
-  - name: get_datetime
-    code: pleiad.tool.datetime
-    description: 获取当前日期、时间、时区和 Unix 时间戳
   - name: text_statistics
     code: example.tool.text_statistics
     description: 统计工作区文本文件的行数、非空行数、词数和字符数
-
 skills:
   - name: task-analysis
-    code: pleiad.skill.task-analysis
+    code: task-analysis
     description: 将复杂任务拆解为目标、约束和验收条件
   - name: data-audit
-    code: pleiad.skill.data-audit
+    code: data-audit
     description: 依据确定性工具结果完成数据质量审计
   - name: tool-development
-    code: pleiad.skill.tool-development
+    code: tool-development
     description: 开发、设计、实现、校验并发布工作区中的自定义 Tool

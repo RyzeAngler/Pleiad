@@ -1,23 +1,80 @@
+default_install_hook_types: [pre-commit, pre-push]
+default_stages: [pre-commit]
+default_language_version:
+  python: python3.12
+minimum_pre_commit_version: "4.3.0"
+
 repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-json
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+        args: [--assume-in-merge]
+      - id: check-case-conflict
+      - id: check-symlinks
+      - id: destroyed-symlinks
+      - id: detect-private-key
+      - id: check-added-large-files
+        args: [--maxkb=1024, --enforce-all]
   - repo: local
     hooks:
-      - id: ruff-format
-        name: Ruff format
-        entry: uv run ruff format --check
+      - id: pleiad-uv-lock
+        name: Pleiad uv lock check
+        entry: uv lock --project packages/pleiad --check
         language: system
         pass_filenames: false
-      - id: ruff-lint
-        name: Ruff lint
-        entry: uv run ruff check .
+      - id: weave-uv-lock
+        name: Weave uv lock check
+        entry: uv lock --project apps/weave --check
         language: system
         pass_filenames: false
-      - id: mypy
-        name: mypy
-        entry: uv run mypy src tests
+      - id: pleiad-ruff-format
+        name: Pleiad Ruff format
+        entry: uv run --directory packages/pleiad --frozen ruff format --check .
+        language: system
+        pass_filenames: false
+      - id: weave-ruff-format
+        name: Weave Ruff format
+        entry: uv run --directory apps/weave --frozen ruff format --check .
+        language: system
+        pass_filenames: false
+      - id: pleiad-ruff-lint
+        name: Pleiad Ruff lint
+        entry: uv run --directory packages/pleiad --frozen ruff check .
+        language: system
+        pass_filenames: false
+      - id: weave-ruff-lint
+        name: Weave Ruff lint
+        entry: uv run --directory apps/weave --frozen ruff check .
+        language: system
+        pass_filenames: false
+      - id: pleiad-mypy
+        name: Pleiad mypy
+        entry: uv run --directory packages/pleiad --frozen mypy
+        language: system
+        pass_filenames: false
+      - id: weave-mypy
+        name: Weave mypy
+        entry: uv run --directory apps/weave --frozen mypy
         language: system
         pass_filenames: false
       - id: import-linter
-        name: import-linter
-        entry: uv run lint-imports
+        name: Package ownership import lint
+        entry: uv run --project apps/weave --frozen lint-imports --config .importlinter
         language: system
         pass_filenames: false
+      - id: pleiad-tests
+        name: Pleiad behavior tests
+        entry: uv run --directory packages/pleiad --frozen pytest -q -m 'not oci and not provider_e2e'
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+      - id: weave-tests
+        name: Weave behavior tests
+        entry: uv run --directory apps/weave --frozen pytest -q -m 'not packaging and not oci and not provider_e2e'
+        language: system
+        pass_filenames: false
+        stages: [pre-push]

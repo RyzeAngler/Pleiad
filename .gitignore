@@ -11,17 +11,13 @@ htmlcov/
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
+.import_linter_cache/
 
 # Build artifacts.
 build/
 dist/
 target/
 *.egg-info/
-
-# Internal design records remain available locally but are not published.
-/docs/architecture.md
-/docs/context-memory-refactor.md
-/docs/tui-design.md
 
 # Local runtime state. Runtime data must never be committed.
 .pleiad-workspace/
@@ -48,3 +44,6 @@ workspace/runtime/traces/*
 .DS_Store
 .idea/
 .vscode/
+
+# SDK command scratch files are runtime data.
+workspace/runtime/scratch/

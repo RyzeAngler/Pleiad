@@ -1,22 +1,50 @@
 [importlinter]
 root_packages =
     pleiad
+    pleiad_weave
 
-[importlinter:llm_is_boundary]
-name = LLM stays below orchestration
+[importlinter:framework_does_not_import_application]
+name = Pleiad framework has no product dependency
 type = forbidden
 source_modules =
-    pleiad.llm
+    pleiad
+forbidden_modules =
+    pleiad_weave
+
+[importlinter:weave_does_not_access_sdk_internals]
+name = Weave uses only the public Pleiad API
+type = forbidden
+source_modules =
+    pleiad_weave
+forbidden_modules =
+    pleiad.runtime.execution.loop
+    pleiad.runtime.execution.model_input
+    pleiad.runtime.execution.control
+allow_indirect_imports = true
+
+[importlinter:weave_uses_runner]
+name = Weave does not bypass the Pleiad Runner
+type = forbidden
+source_modules =
+    pleiad_weave
+forbidden_modules =
+    pleiad.runtime.execution.loop
+allow_indirect_imports = true
+
+[importlinter:models_is_boundary]
+name = Model adapters stay below orchestration
+type = forbidden
+source_modules =
+    pleiad.models
 forbidden_modules =
     pleiad.tools
     pleiad.skills
     pleiad.memory
     pleiad.agent
-    pleiad.graph
+    pleiad.orchestration
     pleiad.runtime
-    pleiad.storage
-    pleiad.application
-    pleiad.entrypoints
+    pleiad_weave.application
+    pleiad_weave.api
 
 [importlinter:tools_is_standalone]
 name = Tools stay independent from orchestration
@@ -27,11 +55,10 @@ forbidden_modules =
     pleiad.skills
     pleiad.memory
     pleiad.agent
-    pleiad.graph
+    pleiad.orchestration
     pleiad.runtime
-    pleiad.storage
-    pleiad.application
-    pleiad.entrypoints
+    pleiad_weave.application
+    pleiad_weave.api
 
 [importlinter:skills_are_prompt_assets]
 name = Skills stay independent from execution
@@ -42,22 +69,10 @@ forbidden_modules =
     pleiad.tools
     pleiad.memory
     pleiad.agent
-    pleiad.graph
+    pleiad.orchestration
     pleiad.runtime
-    pleiad.storage
-    pleiad.application
-    pleiad.entrypoints
-
-[importlinter:graph_is_definition]
-name = Graph definitions do not execute Agents
-type = forbidden
-source_modules =
-    pleiad.graph
-forbidden_modules =
-    pleiad.agent
-    pleiad.runtime
-    pleiad.application
-    pleiad.entrypoints
+    pleiad_weave.application
+    pleiad_weave.api
 
 [importlinter:memory_is_standalone]
 name = Memory stays independent from execution
@@ -66,7 +81,7 @@ source_modules =
     pleiad.memory
 forbidden_modules =
     pleiad.agent
-    pleiad.graph
+    pleiad.orchestration
     pleiad.runtime
-    pleiad.application
-    pleiad.entrypoints
+    pleiad_weave.application
+    pleiad_weave.api
