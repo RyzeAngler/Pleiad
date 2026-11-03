@@ -43,6 +43,9 @@ async def discover_tools[TransportT: ClientTransport](
         raise McpDiscoveryFault() from error
 
     try:
+        unknown_permissions = set(server.tool_permissions) - {remote.name for remote in remote_tools}
+        if unknown_permissions:
+            raise ValueError("Configured MCP permissions name a Tool absent from the discovered server")
         tools = tuple(McpTool(server, tool_info(server.code, remote)) for remote in remote_tools)
         names = [tool.descriptor.name for tool in tools]
         if len(names) != len(set(names)):

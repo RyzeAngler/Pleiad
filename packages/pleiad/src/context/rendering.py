@@ -1,7 +1,7 @@
 import logging
 
 from pleiad.context.selection.models import ContextView
-from pleiad.messages.message import TextBlock, UserMessage
+from pleiad.messages.message import Message, TextBlock, UserMessage
 
 logger = logging.getLogger(__name__)
 
@@ -34,3 +34,35 @@ class ContextRenderer:
         rendered = f"<context>\n{references}\n</context>\n\n<request>\n{request_content}\n</request>"
         logger.debug(f"context rendered blocks={len(context_view.blocks)}")
         return user_message.model_copy(update={"content": (TextBlock(text=rendered),)})
+
+    def render_messages(
+        self,
+        messages: tuple[Message, ...],
+        *,
+        user_message: UserMessage | None,
+        context_view: ContextView,
+    ) -> tuple[Message, ...]:
+        """Render references in the current request without changing stored history.
+
+        Args:
+            messages: Retained completed history in its original order.
+            user_message: New User message, or None for continuation requests.
+            context_view: References selected for this model request.
+
+        Returns:
+            The request messages with references beside the latest User message.
+            If compaction retained no User message, a reference-only User message
+            follows the retained history.
+        """
+        request = messages if user_message is None else (*messages, user_message)
+        if not context_view.blocks:
+            return request
+        for index in range(len(request) - 1, -1, -1):
+            candidate = request[index]
+            if isinstance(candidate, UserMessage):
+                rendered = self.render(candidate, context_view=context_view)
+                return (*request[:index], rendered, *request[index + 1 :])
+        references = "\n\n".join(
+            f"[reference kind={block.kind} origin={block.origin}]\n{block.content}" for block in context_view.blocks
+        )
+        return (*request, UserMessage(content=f"<context>\n{references}\n</context>"))

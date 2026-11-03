@@ -4,6 +4,7 @@ from pydantic import Field, model_validator
 
 from pleiad.contracts import ContractModel, JsonObject
 from pleiad.errors.base import ErrorType
+from pleiad.runtime.lifecycle.state import RunStatus, RunUsage
 
 
 class GraphStatus(StrEnum):
@@ -39,6 +40,8 @@ class NodeResult(ContractModel):
     error_code: str | None = Field(default=None, min_length=1)
     error_message: str | None = Field(default=None, min_length=1)
     error_type: ErrorType | None = None
+    run_status: RunStatus | None = None
+    usage: RunUsage | None = None
 
     @model_validator(mode="after")
     def validate_error(self) -> "NodeResult":
@@ -48,6 +51,8 @@ class NodeResult(ContractModel):
             raise ValueError("Node error fields must be provided together")
         if self.error_type is not None and self.error_type is not ErrorType.BUSINESS:
             raise ValueError("NodeResult only carries business errors")
+        if (self.run_status is None) != (self.usage is None):
+            raise ValueError("Agent Node results require both Run status and usage")
         return self
 
 
@@ -62,6 +67,8 @@ class NodeState(ContractModel):
     error_code: str | None = Field(default=None, min_length=1)
     error_message: str | None = Field(default=None, min_length=1)
     error_type: ErrorType | None = None
+    run_status: RunStatus | None = None
+    usage: RunUsage | None = None
 
 
 class BranchDecision(ContractModel):
@@ -78,6 +85,7 @@ class GraphState(ContractModel):
     revision: int = Field(ge=1)
     graph_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     node_states: tuple[NodeState, ...]
+    child_usage: RunUsage | None
     branch_decisions: tuple[BranchDecision, ...] = ()
     scheduling_position: int = Field(default=0, ge=0)
 
@@ -89,6 +97,7 @@ class GraphResult(ContractModel):
     revision: int
     status: GraphStatus
     state: GraphState
+    child_usage: RunUsage | None
     outputs: JsonObject = Field(default_factory=dict)
     error_code: str | None = None
     error_message: str | None = None

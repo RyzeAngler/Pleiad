@@ -1,0 +1,3 @@
+# Skill and workspace scripts use the standard library by default.
+# Add exact, hash-pinned dependencies here only when a reviewed image rebuild
+# explicitly needs them.

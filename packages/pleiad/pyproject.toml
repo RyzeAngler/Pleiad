@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pleiad"
-version = "0.1.0"
+version = "0.1.1"
 description = "A provider-neutral runtime for building and executing Agents."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"

@@ -192,7 +192,7 @@ apps/weave/src/      # 安装后的 Python 包名：pleiad_weave
 
 ## 开发与验证
 
-SDK 与 App 是独立 Python 项目，各自在自己的目录维护依赖、锁文件和测试配置。App 开发环境通过本地路径使用 SDK；发行安装使用 `pleiad==0.1.0`。
+SDK 与 App 是独立 Python 项目，各自在自己的目录维护依赖、锁文件和测试配置。App 开发环境通过本地路径使用 SDK；发行安装使用 `pleiad==0.1.1`。
 
 ```bash
 uv sync --project packages/pleiad --locked --all-groups --all-extras

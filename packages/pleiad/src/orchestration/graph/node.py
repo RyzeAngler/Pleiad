@@ -12,6 +12,7 @@ from pleiad.runtime.config import RunConfig
 from pleiad.runtime.execution.control import RuntimeHandoffBinding
 from pleiad.runtime.execution.runner import Runner
 from pleiad.runtime.lifecycle.state import RunStatus
+from pleiad.runtime.policy import EffectivePolicy
 from pleiad.schemas import validate_json_schema
 
 NodeHandler = Callable[[JsonObject], Awaitable[JsonObject]]
@@ -37,6 +38,8 @@ class Node:
     config: RunConfig = field(default_factory=RunConfig)
     handoffs: tuple[RuntimeHandoffBinding, ...] = ()
     side_effect: bool = False
+    parent_run_id: str | None = None
+    parent_policy: EffectivePolicy | None = None
 
     def __post_init__(self) -> None:
         """Validate one node's executable binding and schemas."""
@@ -65,6 +68,8 @@ class Node:
             memory=self.memory_factory(node_run_id),
             config=self.config,
             handoffs=self.handoffs,
+            parent_run_id=self.parent_run_id,
+            parent_policy=self.parent_policy,
         )
         if result.status is RunStatus.SUCCEEDED:
             output = result.structured_output or {"text": result.final_output}
@@ -73,6 +78,8 @@ class Node:
                 node_run_id=result.run_id,
                 status=NodeStatus.SUCCEEDED,
                 output=output,
+                run_status=result.status,
+                usage=result.usage,
             )
         if result.error is not None and result.error.type is ErrorType.BUSINESS:
             return NodeResult(
@@ -82,5 +89,23 @@ class Node:
                 error_code=result.error.code,
                 error_message=result.error.message,
                 error_type=ErrorType.BUSINESS,
+                run_status=result.status,
+                usage=result.usage,
+            )
+        if result.status in {RunStatus.LIMIT_REACHED, RunStatus.TIMED_OUT}:
+            message = (
+                "The Agent Node exhausted its model-call or output budget."
+                if result.status is RunStatus.LIMIT_REACHED
+                else "The Agent Node reached its deadline."
+            )
+            return NodeResult(
+                node_id=self.node_id,
+                node_run_id=result.run_id,
+                status=NodeStatus.FAILED,
+                error_code=f"orchestration.graph.node_{result.status.value}",
+                error_message=message,
+                error_type=ErrorType.BUSINESS,
+                run_status=result.status,
+                usage=result.usage,
             )
         raise RuntimeError("Agent graph node did not complete as a business result")

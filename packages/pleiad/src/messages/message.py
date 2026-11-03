@@ -86,7 +86,7 @@ class ToolMessage(MessageBase):
     """Represent the model-visible result for one declared Tool call."""
 
     role: Literal["tool"] = "tool"
-    content: str = Field(max_length=100_000)
+    content: str
     tool_call_id: str = Field(min_length=1, max_length=256)
 
 

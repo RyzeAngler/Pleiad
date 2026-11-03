@@ -1,0 +1,354 @@
+Screen {
+    background: #080A0D;
+    color: #E0E4E8;
+}
+
+MainScreen {
+    width: 100%;
+    height: 100%;
+    background: #080A0D;
+}
+
+#header {
+    width: 100%;
+    height: 3;
+    padding: 0 2;
+    background: #080A0D;
+    border-bottom: solid #2A333C;
+}
+
+#narrow-view-tabs {
+    display: none;
+    width: 100%;
+    height: 2;
+    background: #0B0E12;
+}
+
+#workspace {
+    width: 100%;
+    height: 1fr;
+    layout: horizontal;
+}
+
+#conversation-pane {
+    width: 2fr;
+    min-width: 58;
+    height: 100%;
+    background: #080A0D;
+    border-right: solid #2A333C;
+}
+
+#conversation-header {
+    width: 100%;
+    height: 2;
+    padding: 0 2;
+    background: #0B0E12;
+}
+
+#conversation-follow {
+    width: 100%;
+    height: 1;
+    padding: 0 2;
+    background: #151B21;
+}
+
+#conversation-viewport {
+    width: 100%;
+    height: 1fr;
+    padding: 1 2 0 2;
+    background: #0B0E12;
+    scrollbar-color: #2A333C;
+    scrollbar-color-hover: #7FB7FF;
+}
+
+.conversation-item {
+    width: 100%;
+    height: auto;
+    margin: 0 0 1 0;
+}
+
+.message-heading {
+    width: 100%;
+    height: 1;
+}
+
+.message-body {
+    width: 100%;
+    height: auto;
+    padding: 0 0 0 2;
+    color: #E0E4E8;
+}
+
+.assistant-message {
+    margin-top: 1;
+}
+
+.process-archive {
+    padding: 0 1;
+    color: #A0A9B2;
+}
+
+.process-archive:focus {
+    background: #151B21;
+    border-left: solid #7FB7FF;
+}
+
+.system-notice {
+    padding: 0 1;
+    background: #151B21;
+}
+
+.system-notice.error {
+    border-left: solid #EF6B73;
+}
+
+.system-notice.warning {
+    border-left: solid #EAB308;
+}
+
+#process-pane {
+    width: 100%;
+    height: auto;
+    min-height: 2;
+    max-height: 7;
+    padding: 0 2;
+    background: #080A0D;
+    border-top: solid #2A333C;
+}
+
+#process-header {
+    width: 100%;
+    height: 1;
+    background: #080A0D;
+}
+
+#process-log {
+    width: 100%;
+    height: auto;
+    max-height: 6;
+    background: #0B0E12;
+    scrollbar-color: #2A333C;
+    scrollbar-color-hover: #7FB7FF;
+}
+
+#inspector-pane {
+    width: 1fr;
+    min-width: 38;
+    height: 100%;
+    background: #0B0E12;
+}
+
+#inspector-tabs {
+    width: 100%;
+    height: 2;
+    background: #0B0E12;
+}
+
+#inspector-switcher {
+    width: 100%;
+    height: 1fr;
+    background: #0B0E12;
+}
+
+#runtime-view,
+#graph-view,
+#trace-view {
+    width: 100%;
+    height: 100%;
+    background: #0B0E12;
+}
+
+#runtime-summary {
+    width: 100%;
+    height: 5;
+    padding: 1 2;
+    background: #0B0E12;
+    border-bottom: solid #2A333C;
+}
+
+#program-log {
+    width: 100%;
+    height: 1fr;
+    background: #0B0E12;
+}
+
+#program-log-header,
+#trace-header {
+    width: 100%;
+    height: 2;
+    padding: 0 2;
+    background: #0B0E12;
+}
+
+#program-log-buffer,
+#trace-log {
+    width: 100%;
+    height: 1fr;
+    padding: 0 2;
+    background: #0B0E12;
+    scrollbar-color: #2A333C;
+    scrollbar-color-hover: #7FB7FF;
+}
+
+#graph-body {
+    width: 100%;
+    height: auto;
+    padding: 1 2;
+}
+
+#composer {
+    width: 100%;
+    height: 3;
+    padding: 0 1;
+    background: #0B0E12;
+    border: dashed #68727C;
+}
+
+#composer:focus-within {
+    border: dashed #7FB7FF;
+}
+
+#composer-label {
+    width: 3;
+    height: 1;
+    padding: 0 0 0 1;
+    color: #7FB7FF;
+}
+
+#composer-input {
+    width: 1fr;
+    height: 1;
+    border: none;
+    background: transparent;
+}
+
+#composer-hint {
+    width: 14;
+    height: 1;
+    padding: 0 1 0 0;
+    text-align: right;
+}
+
+#footer {
+    width: 100%;
+    height: 2;
+    padding: 0 2;
+    background: #080A0D;
+    border-top: solid #2A333C;
+}
+
+Tabs {
+    color: #68727C;
+}
+
+Tab {
+    color: #68727C;
+}
+
+Tab.-active {
+    color: #7FB7FF;
+}
+
+MainScreen.compact #conversation-pane {
+    width: 3fr;
+    min-width: 58;
+}
+
+MainScreen.compact #inspector-pane {
+    width: 2fr;
+    min-width: 38;
+}
+
+MainScreen.narrow #narrow-view-tabs {
+    display: block;
+}
+
+MainScreen.narrow #conversation-pane {
+    width: 1fr;
+    min-width: 0;
+    border-right: none;
+}
+
+MainScreen.narrow #inspector-pane {
+    display: none;
+    width: 1fr;
+    min-width: 0;
+}
+
+MainScreen.narrow.inspector-visible #conversation-pane {
+    display: none;
+}
+
+MainScreen.narrow.inspector-visible #inspector-pane {
+    display: block;
+}
+
+MainScreen.short #process-pane {
+    max-height: 4;
+}
+
+MainScreen.short #process-log {
+    max-height: 3;
+}
+
+MainScreen.short #runtime-summary {
+    height: 3;
+    padding: 0 2;
+}
+
+#help-title {
+    width: 100%;
+    height: 3;
+    padding: 1 2;
+    color: #5BD6E8;
+    border-bottom: solid #2A333C;
+}
+
+#help-body {
+    width: 100%;
+    height: 1fr;
+    padding: 1 2;
+    background: #0B0E12;
+}
+
+ApprovalScreen {
+    align: center middle;
+    background: #080A0DDD;
+}
+
+#approval-dialog {
+    width: 90%;
+    max-width: 110;
+    height: 90%;
+    padding: 1 2;
+    border: solid #EAB308;
+    background: #0B0E12;
+}
+
+#approval-title {
+    height: auto;
+    margin-bottom: 1;
+    color: #EAB308;
+}
+
+#approval-list {
+    height: 5;
+}
+
+#approval-body {
+    height: 1fr;
+    margin: 1 0;
+}
+
+#approval-details {
+    height: auto;
+}
+
+#approval-actions {
+    height: 3;
+}
+
+#approval-actions Button {
+    min-width: 12;
+    margin-right: 1;
+}

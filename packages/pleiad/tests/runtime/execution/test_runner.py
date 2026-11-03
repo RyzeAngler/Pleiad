@@ -1,14 +1,16 @@
 import asyncio
+import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
 import pytest
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from pleiad.agent.agent import Agent
 from pleiad.agent.errors import AgentConfigurationError
+from pleiad.agent.policy import AgentPolicyHints
 from pleiad.context.budget import ContextBudget
 from pleiad.context.selection.models import ContextBlock
 from pleiad.contracts import CapabilityGrants, ContractModel, JsonObject, SkillRef, ToolRef
@@ -17,7 +19,7 @@ from pleiad.events.message import MessageAbortedEvent, MessageCompletedEvent, Me
 from pleiad.events.runtime import ModelCompletedEvent, RunStartedEvent
 from pleiad.memory.short_memory import ShortMemory
 from pleiad.memory.turn import Turn
-from pleiad.messages.message import AssistantMessage
+from pleiad.messages.message import AssistantMessage, TextBlock, ToolMessage, UserMessage
 from pleiad.models.anthropic.client import AnthropicModelClient
 from pleiad.models.anthropic.request import AnthropicRequest
 from pleiad.models.anthropic.response import (
@@ -37,6 +39,7 @@ from pleiad.models.openai.response import (
     OpenAIStreamToolCall,
     OpenAIUsage,
 )
+from pleiad.orchestration.handoff.handoff import Handoff
 from pleiad.runtime.config import RunConfig
 from pleiad.runtime.errors import RuntimeStateError
 from pleiad.runtime.execution.runner import Runner, combined_event_sink
@@ -214,7 +217,7 @@ def anthropic_text_batch(text: str, response_id: str) -> tuple[AnthropicStreamEv
     )
 
 
-def tool_batch(call_id: str) -> tuple[OpenAIStreamChunk, ...]:
+def tool_batch(call_id: str, *, name: str = "echo", arguments: str = '{"value":"x"}') -> tuple[OpenAIStreamChunk, ...]:
     """Create a complete single-Tool-Call response batch."""
     return (
         OpenAIStreamChunk(
@@ -227,7 +230,7 @@ def tool_batch(call_id: str) -> tuple[OpenAIStreamChunk, ...]:
                             OpenAIStreamToolCall(
                                 index=0,
                                 id=call_id,
-                                function=OpenAIStreamFunction(name="echo", arguments='{"value":"x"}'),
+                                function=OpenAIStreamFunction(name=name, arguments=arguments),
                             ),
                         ),
                     ),
@@ -357,6 +360,58 @@ def test_runner_completes_the_model_tool_model_loop_at_turn_boundaries(tmp_path:
     assert turns[1].messages[-1].content == "finished"
     assert len(model.requests) == 2
     assert model.requests[1].messages[-1].role == "tool"
+
+
+def test_tool_continuation_retains_dynamic_references_without_rewriting_memory(tmp_path: Path) -> None:
+    """The second model request keeps references and the original Tool pairing."""
+    model = FakeOpenAIModel((tool_batch("call-1"), text_batch("finished", "response-2")))
+    runner, agent = make_runner(model, tmp_path, successful_tool)
+    memory = ShortMemory.in_memory("context-tool-continuation")
+    original = UserMessage(content=(TextBlock(text="Use the Tool."),))
+    references = (ContextBlock(kind="task_state", origin="request", content="customer=Alpha"),)
+
+    result = asyncio.run(runner.run(agent, original, memory=memory, context_blocks=references, config=RunConfig()))
+
+    assert result.status is RunStatus.SUCCEEDED
+    assert all("customer=Alpha" in request.model_dump_json() for request in model.requests)
+    assert [message.role for message in model.requests[1].messages] == ["system", "user", "assistant", "tool"]
+    assert model.requests[1].messages[-1].tool_call_id == "call-1"
+    assert asyncio.run(memory.read())[0].messages[0] == original
+
+
+def test_resumed_run_uses_current_references_without_persisting_them(tmp_path: Path) -> None:
+    """Resume uses its current request references beside the original user input."""
+    model = FakeOpenAIModel((tool_batch("call-1"), text_batch("resumed", "response-2")))
+    runner, agent = make_runner(model, tmp_path, interrupting_tool)
+    memory = ShortMemory.in_memory("context-resume")
+    original = UserMessage(content="Wait for approval.")
+
+    async def exercise() -> RunResult:
+        interrupted = await runner.run(
+            agent,
+            original,
+            memory=memory,
+            context_blocks=(ContextBlock(kind="task_state", origin="request", content="old-reference"),),
+            config=RunConfig(),
+        )
+        assert interrupted.checkpoint is not None
+        return await runner.resume(
+            agent,
+            interrupted.checkpoint,
+            memory=memory,
+            resolutions=(approved_resolution(),),
+            context_blocks=(ContextBlock(kind="task_state", origin="request", content="current-reference"),),
+            config=RunConfig(),
+        )
+
+    result = asyncio.run(exercise())
+
+    assert result.status is RunStatus.SUCCEEDED
+    assert "current-reference" in model.requests[1].model_dump_json()
+    assert "old-reference" not in model.requests[1].model_dump_json()
+    assert [message.role for message in model.requests[1].messages] == ["system", "user", "assistant", "tool"]
+    assert model.requests[1].messages[-1].tool_call_id == "call-1"
+    assert asyncio.run(memory.read())[0].messages[0] == original
 
 
 def test_agent_completes_anthropic_tool_roundtrip(tmp_path: Path) -> None:
@@ -615,6 +670,101 @@ def test_runner_propagates_cancellation_after_aborting_the_active_turn(tmp_path:
     assert [event.kind for event in events][-2:] == ["message.aborted", "run.cancelled"]
 
 
+@pytest.mark.parametrize("event_kind", ["run.started", "turn.started", "message.completed"])
+def test_cancellation_during_startup_leaves_memory_available_for_next_run(tmp_path: Path, event_kind: str) -> None:
+    """Cancellation before the model loop releases the newly owned Turn."""
+    model = FakeOpenAIModel((text_batch("next answer", "next-response"),))
+    runner, agent = make_runner(model, tmp_path)
+    memory = ShortMemory.in_memory("startup-cancel")
+
+    async def exercise() -> RunResult:
+        blocked = asyncio.Event()
+
+        async def sink(event: Event) -> None:
+            if event.kind == event_kind and not blocked.is_set():
+                blocked.set()
+                await asyncio.Event().wait()
+
+        runner.event_sink = sink
+        task = asyncio.create_task(runner.run(agent, "cancel", memory=memory, config=RunConfig()))
+        await asyncio.wait_for(blocked.wait(), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert await memory.active() is None
+        assert model.requests == []
+        return await runner.run(agent, "next", memory=memory, config=RunConfig())
+
+    result = asyncio.run(exercise())
+
+    assert result.status is RunStatus.SUCCEEDED
+    assert result.final_output == "next answer"
+    assert asyncio.run(memory.read())[0].messages[0].content == "next"
+
+
+def test_handoff_enforces_the_target_agents_shorter_deadline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A tighter target policy cancels its model and closes its active Turn."""
+    source_model = FakeOpenAIModel(
+        (
+            (
+                OpenAIStreamChunk(
+                    id="handoff-response",
+                    model="fake-model",
+                    choices=(
+                        OpenAIStreamChoice(
+                            delta=OpenAIStreamDelta(
+                                tool_calls=(
+                                    OpenAIStreamToolCall(
+                                        index=0,
+                                        id="handoff-call",
+                                        function=OpenAIStreamFunction(name="transfer", arguments='{"task":"review"}'),
+                                    ),
+                                ),
+                            ),
+                            finish_reason="tool_calls",
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+    target_model = BlockingOpenAIModel()
+    runner, source = make_runner(source_model, tmp_path)
+    target = Agent(
+        name="reviewer",
+        model=target_model,
+        prompt="Review the task.",
+        policy_hints=AgentPolicyHints(timeout_seconds=0.01),
+    )
+    binding = Handoff(source=source, target=target, name="transfer", description="Transfer to reviewer").bind(runner)
+    memory = ShortMemory.in_memory("handoff-deadline")
+
+    async def exercise() -> RunResult:
+        timer = asyncio.Timeout(None)
+        reschedule = timer.reschedule
+
+        def expire_target_deadline(when: float | None) -> None:
+            if when is None:
+                reschedule(None)
+            else:
+                assert when - asyncio.get_running_loop().time() <= 0.01
+                reschedule(asyncio.get_running_loop().time())
+
+        monkeypatch.setattr(timer, "reschedule", expire_target_deadline)
+        monkeypatch.setattr(asyncio, "timeout", lambda delay: timer)
+        return await asyncio.wait_for(
+            runner.run(source, "review", memory=memory, config=RunConfig(timeout_seconds=60.0), handoffs=(binding,)),
+            timeout=1,
+        )
+
+    result = asyncio.run(exercise())
+
+    assert result.status is RunStatus.TIMED_OUT
+    assert target_model.started.is_set()
+    assert asyncio.run(memory.active()) is None
+    assert len(asyncio.run(memory.read())) == 1
+
+
 def test_run_stream_context_closes_an_unconsumed_run(tmp_path: Path) -> None:
     """Leaving the explicit stream scope cancels and cleans its owned Run."""
     model = BlockingOpenAIModel()
@@ -645,6 +795,40 @@ def test_missing_tool_binding_fails_before_turn_starts(tmp_path: Path) -> None:
         asyncio.run(runner.run(agent, "hello", memory=memory, config=RunConfig()))
 
     assert asyncio.run(memory.read()) == ()
+    assert model.requests == []
+
+
+@pytest.mark.parametrize(("name", "code"), [("read_tool_result", "host.reader"), ("host_reader", "read_tool_result")])
+def test_host_tool_cannot_shadow_the_memory_bound_result_reader(tmp_path: Path, name: str, code: str) -> None:
+    """Reserved result-reader identity fails before a Turn or model request starts."""
+    model = FakeOpenAIModel((text_batch("unexpected", "response-1"),))
+    runner, base_agent = make_runner(model, tmp_path)
+    descriptor = ToolDescriptor(name=name, code=code, description="Host result reader")
+    runner.tools.register(descriptor, lambda selected: FunctionTool(selected, successful_tool, EchoArguments))
+    agent = Agent(name=base_agent.name, model=model, prompt=base_agent.prompt, tools=(ToolRef(code),))
+    memory = ShortMemory.in_memory("reader-shadow")
+
+    with pytest.raises(AgentConfigurationError, match="reserved"):
+        asyncio.run(runner.run(agent, "run", memory=memory, config=RunConfig()))
+
+    assert asyncio.run(memory.active()) is None
+    assert model.requests == []
+
+
+def test_handoff_cannot_shadow_the_memory_bound_result_reader(tmp_path: Path) -> None:
+    """A reserved Handoff name fails before Runtime starts a Turn."""
+    model = FakeOpenAIModel(())
+    runner, source = make_runner(model, tmp_path)
+    target = Agent(name="reviewer", model=model, prompt="Review the task.")
+    binding = Handoff(source=source, target=target, name="read_tool_result", description="Transfer to reviewer").bind(
+        runner
+    )
+    memory = ShortMemory.in_memory("handoff-reader-shadow")
+
+    with pytest.raises(AgentConfigurationError, match="reserved"):
+        asyncio.run(runner.run(source, "run", memory=memory, config=RunConfig(), handoffs=(binding,)))
+
+    assert asyncio.run(memory.active()) is None
     assert model.requests == []
 
 
@@ -1093,3 +1277,54 @@ def test_run_checkpoint_rejects_old_usage_accounting_version(tmp_path: Path) -> 
     old["version"] = 1
     with pytest.raises(ValidationError, match="version"):
         RunState.model_validate(old)
+
+
+def test_runner_reads_a_large_file_then_reloads_its_original_result_by_reference(tmp_path: Path) -> None:
+    class ReloadingModel(FakeOpenAIModel):
+        async def stream(self, request: OpenAIRequest | Mapping[str, object]) -> AsyncIterator[OpenAIStreamChunk]:
+            if len(self.requests) == 1:
+                if not isinstance(request, OpenAIRequest):
+                    raise TypeError("fake model requires a parsed OpenAI request")
+                observation = request.messages[-1]
+                assert observation.role == "tool" and isinstance(observation.content, str)
+                reference = TypeAdapter[JsonObject](JsonObject).validate_json(observation.content)
+                assert reference["compacted"] is True
+                self.batches = iter(
+                    (
+                        tool_batch(
+                            "reload-call",
+                            name="read_tool_result",
+                            arguments=json.dumps(reference["read_tool_result"]),
+                        ),
+                        text_batch("Evidence read successfully", "final-response"),
+                    )
+                )
+            async for chunk in super().stream(request):
+                yield chunk
+
+    model = ReloadingModel(
+        (tool_batch("file-call", name="read_file", arguments='{"scope":"workspace","path":"evidence.txt"}'),)
+    )
+    runner, agent = make_runner(model, tmp_path)
+    (tmp_path / "workspace" / "evidence.txt").write_text("evidence " * 15_000, encoding="utf-8")
+    runner.host_policy = HostPolicy(grants=CapabilityGrants(capabilities=frozenset({"file.read"})))
+    memory = ShortMemory.sqlite("read-evidence", tmp_path / "memory.sqlite3")
+
+    async def scenario() -> None:
+        result = await runner.run(agent, "Read evidence.txt", memory=memory, config=RunConfig())
+        assert result.status is RunStatus.SUCCEEDED
+        assert result.final_output == "Evidence read successfully"
+        original = next(message for message in (await memory.read())[0].messages if isinstance(message, ToolMessage))
+        assert len(original.content) > 100_000
+        read_back = model.requests[2].messages[-1]
+        assert read_back.role == "tool" and isinstance(read_back.content, str)
+        page_result = TypeAdapter[JsonObject](JsonObject).validate_json(read_back.content)
+        page = page_result["output"]
+        assert isinstance(page, dict)
+        assert page["content"] == original.content[:4_000]
+        assert page["truncated"] is True
+        assert page["next_start_char"] == 4_000
+        restored = ShortMemory.sqlite("read-evidence", tmp_path / "memory.sqlite3")
+        assert await restored.read_tool_result(original.message_id) == original
+
+    asyncio.run(scenario())

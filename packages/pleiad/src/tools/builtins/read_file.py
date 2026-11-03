@@ -9,8 +9,9 @@ from pleiad.tools.builtins.file_support import (
     FileToolBinding,
     content_digest,
     normalize_relative_path,
+    read_scope_root,
     read_scoped_bytes,
-    resolve_read_path,
+    run_file_io,
     select_lines,
 )
 from pleiad.tools.contracts import ToolContext, ToolDescriptor, ToolPolicy
@@ -77,17 +78,18 @@ class ReadFileTool(BaseTool):
         """Read one line-bounded UTF-8 file from a bound relative scope."""
         parsed = ReadFileArguments.model_validate(arguments)
         relative_path = normalize_relative_path(parsed.path, parsed.scope)
-        resolved = resolve_read_path(
+        root = read_scope_root(
             self.binding,
             parsed.scope,
-            relative_path,
             parsed.skill_code,
         )
-        data = read_scoped_bytes(
-            resolved,
-            scope=parsed.scope,
-            relative_path=relative_path,
-            max_bytes=self.binding.max_read_bytes,
+        data = await run_file_io(
+            lambda: read_scoped_bytes(
+                root,
+                scope=parsed.scope,
+                relative_path=relative_path,
+                max_bytes=self.binding.max_read_bytes,
+            )
         )
         try:
             text = data.decode("utf-8")

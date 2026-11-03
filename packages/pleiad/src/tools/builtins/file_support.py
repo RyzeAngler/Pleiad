@@ -1,10 +1,15 @@
+import asyncio
+import fcntl
 import hashlib
 import os
-import tempfile
-from collections.abc import Mapping
+import stat
+import time
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
+from uuid import uuid4
 
 from pleiad.tools.errors import (
     InvalidToolArgumentsError,
@@ -62,68 +67,85 @@ def normalize_relative_path(value: str, scope: str) -> str:
     return value
 
 
-def resolve_read_path(
+def read_scope_root(
     binding: FileToolBinding,
     scope: str,
-    relative_path: str,
     skill_code: str | None,
 ) -> Path:
-    """Resolve one read scope through its owner boundary."""
+    """Select a host-owned root without resolving model-controlled paths."""
     if scope == "workspace":
-        return resolve_scoped_path(binding.workspace, relative_path, scope)
+        return binding.workspace
     if scope == "scratch":
-        return resolve_scoped_path(binding.scratch, relative_path, scope)
+        return binding.scratch
     if skill_code is None:
         raise InvalidToolArgumentsError("skill_code is required for the skill scope.")
     try:
         root = binding.skill_roots[skill_code]
     except KeyError as error:
         raise ToolFileNotFoundError(f"The selected Skill is not available: {skill_code}.") from error
-    return resolve_scoped_path(root, relative_path, scope)
+    return root
 
 
-def resolve_scoped_path(root: Path, relative_path: str, scope: str) -> Path:
-    """Resolve a workspace or scratch path without following symlinks."""
-    candidate = root.joinpath(*relative_path.split("/"))
-    current = root
-    for part in relative_path.split("/"):
-        current = current / part
-        if current.is_symlink():
-            raise ToolFileAccessDeniedError(f"The {scope} path crosses a symbolic link: {relative_path}.")
-    resolved = candidate.resolve()
+@contextmanager
+def scoped_parent(root: Path, relative_path: str, *, create: bool = False) -> Iterator[tuple[int, str]]:
+    """Pin every directory component without following replacement symlinks."""
+    parts = normalize_relative_path(relative_path, "file").split("/")
+    directory = os.open(root.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        resolved.relative_to(root)
-    except ValueError as error:
-        raise ToolFileAccessDeniedError(f"The {scope} path is outside its permitted root: {relative_path}.") from error
-    return resolved
+        for part in root.parts[1:]:
+            child = open_directory(directory, part, create=False)
+            os.close(directory)
+            directory = child
+        for part in parts[:-1]:
+            child = open_directory(directory, part, create=create)
+            os.close(directory)
+            directory = child
+        yield directory, parts[-1]
+    finally:
+        os.close(directory)
 
 
-def read_scoped_bytes(path: Path, *, scope: str, relative_path: str, max_bytes: int) -> bytes:
-    """Read regular bounded bytes and map filesystem failures to Tool errors."""
+def open_directory(parent: int, name: str, *, create: bool) -> int:
+    """Open or create one directory relative to a pinned parent descriptor."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     try:
-        if not path.exists():
-            raise ToolFileNotFoundError(f"The {scope} file does not exist: {relative_path}.")
-        if not path.is_file() or path.is_symlink():
+        return os.open(name, flags, dir_fd=parent)
+    except FileNotFoundError:
+        if not create:
+            raise
+        try:
+            os.mkdir(name, dir_fd=parent)
+        except FileExistsError:
+            return os.open(name, flags, dir_fd=parent)
+        return os.open(name, flags, dir_fd=parent)
+
+
+def read_regular_bytes(parent: int, name: str, *, scope: str, relative_path: str, max_bytes: int) -> bytes:
+    """Read at most one excess byte from a regular, non-symlink file."""
+    descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+    with os.fdopen(descriptor, "rb") as stream:
+        metadata = os.fstat(stream.fileno())
+        if not stat.S_ISREG(metadata.st_mode):
             raise ToolFileAccessDeniedError(f"The {scope} path is not an accessible regular file: {relative_path}.")
-        size = path.stat().st_size
-        if size > max_bytes:
-            raise ToolFileTooLargeError(
-                f"The {scope} file exceeds the {max_bytes} byte limit: {relative_path} ({size} bytes)."
-            )
-        data = path.read_bytes()
-    except (ToolFileAccessDeniedError, ToolFileNotFoundError, ToolFileTooLargeError):
-        raise
-    except PermissionError as error:
-        raise ToolFileAccessDeniedError(f"Permission was denied for the {scope} file: {relative_path}.") from error
+        if metadata.st_size > max_bytes:
+            raise ToolFileTooLargeError(f"The {scope} file exceeds the {max_bytes} byte limit: {relative_path}.")
+        data = stream.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise ToolFileTooLargeError(f"The {scope} file exceeds the {max_bytes} byte limit: {relative_path}.")
+    return data
+
+
+def read_scoped_bytes(root: Path, *, scope: str, relative_path: str, max_bytes: int) -> bytes:
+    """Read through pinned directories and translate filesystem failures."""
+    try:
+        with scoped_parent(root, relative_path) as (parent, name):
+            return read_regular_bytes(parent, name, scope=scope, relative_path=relative_path, max_bytes=max_bytes)
     except FileNotFoundError as error:
         raise ToolFileNotFoundError(f"The {scope} file does not exist: {relative_path}.") from error
     except OSError as error:
-        raise ToolFileAccessDeniedError(f"The {scope} file could not be read: {relative_path}.") from error
-    if len(data) > max_bytes:
-        raise ToolFileTooLargeError(
-            f"The {scope} file exceeds the {max_bytes} byte limit: {relative_path} ({len(data)} bytes)."
-        )
-    return data
+        raise ToolFileAccessDeniedError(
+            f"The {scope} path is not an accessible regular file: {relative_path}."
+        ) from error
 
 
 def select_lines(text: str, start_line: int, max_lines: int) -> tuple[str, int, bool]:
@@ -136,51 +158,100 @@ def select_lines(text: str, start_line: int, max_lines: int) -> tuple[str, int, 
     return "".join(selected), line_end, truncated
 
 
-def ensure_parent_directory(root: Path, target: Path, relative_path: str) -> None:
-    """Create missing workspace parents while refusing symlink traversal."""
-    parent = target.parent
-    relative_parent = parent.relative_to(root)
-    current = root
-    for part in relative_parent.parts:
-        current = current / part
-        if current.is_symlink():
-            raise ToolFileAccessDeniedError(f"The workspace path crosses a symbolic link: {relative_path}.")
+@contextmanager
+def directory_write_lock(parent: int, relative_path: str) -> Iterator[None]:
+    """Serialize cooperating SDK writers without creating model-visible lock files."""
+    deadline = time.monotonic() + 10.0
+    while True:
         try:
-            current.mkdir(exist_ok=True)
-        except FileExistsError as error:
-            if current.is_symlink() or not current.is_dir():
-                raise ToolFileAccessDeniedError(f"The workspace parent is not a directory: {relative_path}.") from error
-        except OSError as error:
-            raise ToolFileAccessDeniedError(
-                f"The workspace parent directory could not be created: {relative_path}."
-            ) from error
-
-
-def write_atomic(target: Path, data: bytes, *, create: bool, relative_path: str) -> None:
-    """Write bytes through a same-directory temporary file and atomic install."""
-    temporary_path: Path | None = None
+            fcntl.flock(parent, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError as error:
+            if time.monotonic() >= deadline:
+                raise ToolFileConflictError(f"The workspace directory is busy: {relative_path}.") from error
+            time.sleep(0.01)
     try:
-        with tempfile.NamedTemporaryFile(dir=target.parent, prefix=".pleiad-write-", delete=False) as temporary:
-            temporary_path = Path(temporary.name)
-            temporary.write(data)
-            temporary.flush()
-            os.fsync(temporary.fileno())
-        if create:
-            os.link(temporary_path, target)
-            temporary_path.unlink()
-            temporary_path = None
-        else:
-            os.replace(temporary_path, target)
-            temporary_path = None
+        yield
+    finally:
+        fcntl.flock(parent, fcntl.LOCK_UN)
+
+
+def write_scoped_bytes(
+    root: Path,
+    relative_path: str,
+    data: bytes,
+    *,
+    expected_sha256: str | None,
+    max_bytes: int,
+) -> None:
+    """Create or replace text under a directory lock shared by SDK processes.
+
+    The digest is checked after staging and immediately before installation.
+    Writers that ignore the advisory lock can still race the final check and
+    replacement; this operation is not an atomic CAS against arbitrary editors.
+    """
+    try:
+        with (
+            scoped_parent(root, relative_path, create=True) as (parent, name),
+            directory_write_lock(parent, relative_path),
+        ):
+            temporary_name = f".pleiad-write-{uuid4().hex}"
+            descriptor = os.open(
+                temporary_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent
+            )
+            staged = True
+            try:
+                with os.fdopen(descriptor, "wb") as temporary:
+                    temporary.write(data)
+                    temporary.flush()
+                    os.fsync(temporary.fileno())
+                if expected_sha256 is None:
+                    try:
+                        read_regular_bytes(
+                            parent, name, scope="workspace", relative_path=relative_path, max_bytes=max_bytes
+                        )
+                    except FileNotFoundError:
+                        os.link(temporary_name, name, src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
+                    else:
+                        raise ToolFileConflictError(f"The workspace file already exists: {relative_path}.")
+                else:
+                    current = read_regular_bytes(
+                        parent, name, scope="workspace", relative_path=relative_path, max_bytes=max_bytes
+                    )
+                    if content_digest(current) != expected_sha256:
+                        raise ToolFileConflictError(f"The workspace file changed before replacement: {relative_path}.")
+                    os.replace(temporary_name, name, src_dir_fd=parent, dst_dir_fd=parent)
+                    staged = False
+            finally:
+                if staged:
+                    os.unlink(temporary_name, dir_fd=parent)
     except FileExistsError as error:
         raise ToolFileConflictError(f"The workspace file already exists: {relative_path}.") from error
-    except PermissionError as error:
-        raise ToolFileAccessDeniedError(f"Permission was denied for the workspace file: {relative_path}.") from error
+    except FileNotFoundError as error:
+        raise ToolFileNotFoundError(f"The workspace file does not exist: {relative_path}.") from error
     except OSError as error:
         raise ToolFileAccessDeniedError(f"The workspace file could not be written: {relative_path}.") from error
-    finally:
-        if temporary_path is not None:
-            temporary_path.unlink(missing_ok=True)
+
+
+async def run_file_io[ResultT](operation: Callable[[], ResultT]) -> ResultT:
+    """Finish owned filesystem cleanup before propagating cancellation."""
+    task = asyncio.create_task(asyncio.to_thread(operation))
+    cancelled = False
+    while True:
+        try:
+            result = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.cancelled():
+                raise
+            cancelled = True
+            continue
+        except Exception as error:
+            if cancelled:
+                raise asyncio.CancelledError from error
+            raise
+        if cancelled:
+            raise asyncio.CancelledError
+        return result
 
 
 def content_digest(data: bytes) -> str:

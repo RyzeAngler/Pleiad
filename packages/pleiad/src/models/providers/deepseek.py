@@ -187,7 +187,7 @@ class AnthropicProvider:
     async def stream_events(self, request: AnthropicRequest) -> AsyncIterator[AnthropicStreamEvent]:
         """Convert DeepSeek Anthropic stream events into protocol events."""
         payload = request_payload(request, self.model, self.provider_options, "deepseek", "anthropic")
-        payload["stream"] = True
+        payload.pop("stream")
         completed = False
         try:
             stream: Callable[..., object] = self.client.messages.stream

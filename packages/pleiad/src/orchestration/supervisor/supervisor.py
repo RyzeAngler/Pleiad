@@ -1,6 +1,5 @@
 import asyncio
 from collections.abc import Mapping
-from dataclasses import dataclass
 from types import TracebackType
 from uuid import uuid4
 
@@ -14,6 +13,7 @@ from pleiad.events.supervisor import (
     WorkerSubmittedEvent,
 )
 from pleiad.memory.short_memory import ShortMemory
+from pleiad.orchestration.budget import BudgetLedger
 from pleiad.orchestration.errors import (
     DelegationNotFoundError,
     OrchestrationConfigurationError,
@@ -31,27 +31,12 @@ from pleiad.runtime.lifecycle.state import RunStatus
 from pleiad.tools.contracts import ParentRunLimits, ToolContext
 
 
-@dataclass(slots=True)
-class ParentBudget:
-    """Mutable reservation ledger for concurrent children of one parent Run."""
-
-    remaining_turns: int
-    remaining_output_tokens: int
-
-
-@dataclass(frozen=True, slots=True)
-class BudgetReservation:
-    """Budget held for one accepted Worker until its result is settled."""
-
-    parent_run_id: str
-    turns: int
-    output_tokens: int
-
-
 class Supervisor:
     """Own synchronous and explicitly scoped asynchronous Worker Runs."""
 
-    def __init__(self, workers: Mapping[str, Worker] | tuple[Worker, ...]) -> None:
+    def __init__(
+        self, workers: Mapping[str, Worker] | tuple[Worker, ...], *, budgets: BudgetLedger | None = None
+    ) -> None:
         """Bind the host allowlist of Worker Runs."""
         selected = dict(workers) if isinstance(workers, Mapping) else {worker.worker_id: worker for worker in workers}
         if not isinstance(workers, Mapping) and len(selected) != len(workers):
@@ -66,8 +51,7 @@ class Supervisor:
         self.signals: dict[str, asyncio.Event] = {}
         self.memories: dict[str, ShortMemory] = {}
         self.task_group: asyncio.TaskGroup | None = None
-        self.parent_budgets: dict[str, ParentBudget] = {}
-        self.reservations: dict[str, BudgetReservation] = {}
+        self.budgets = BudgetLedger() if budgets is None else budgets
         self.sequence = 0
 
     async def __aenter__(self) -> "Supervisor":
@@ -158,11 +142,13 @@ class Supervisor:
                 parent_policy=parent_policy,
             )
         except asyncio.CancelledError:
+            self.budgets.settle(delegation_id, None)
             self.records[delegation_id] = self.records[delegation_id].model_copy(
                 update={"status": DelegationStatus.CANCELLED}
             )
             raise
         except Exception as error:
+            self.budgets.settle(delegation_id, None)
             self.records[delegation_id] = self.records[delegation_id].model_copy(
                 update={
                     "status": DelegationStatus.FAILED,
@@ -235,9 +221,11 @@ class Supervisor:
                 parent_policy=worker.parent_policy(context),
             )
         except asyncio.CancelledError:
+            self.budgets.settle(delegation_id, None)
             self.record_terminal(delegation_id, DelegationStatus.CANCELLED)
             raise
         except Exception as error:
+            self.budgets.settle(delegation_id, None)
             self.record_terminal(
                 delegation_id,
                 DelegationStatus.FAILED,
@@ -255,42 +243,33 @@ class Supervisor:
         parent_run_id = context.run_id
         if limits is None or parent_run_id is None:
             return context
-        pool = self.parent_budgets.get(parent_run_id)
-        if pool is None:
-            pool = ParentBudget(limits.remaining_turns, limits.remaining_output_tokens)
-            self.parent_budgets[parent_run_id] = pool
-        turns = min(worker.config.max_turns, pool.remaining_turns)
-        output_tokens = min(worker.config.max_output_tokens, pool.remaining_output_tokens)
-        if turns < 1 or output_tokens < 1:
+        reservation = self.budgets.reserve(
+            delegation_id, parent_run_id, limits, worker.config.max_turns, worker.config.max_output_tokens
+        )
+        if reservation is None:
             raise WorkerBudgetError()
-        pool.remaining_turns -= turns
-        pool.remaining_output_tokens -= output_tokens
-        self.reservations[delegation_id] = BudgetReservation(parent_run_id, turns, output_tokens)
         reserved_limits = ParentRunLimits(
             deadline=limits.deadline,
-            remaining_turns=turns,
-            remaining_output_tokens=output_tokens,
+            remaining_turns=reservation.turns,
+            remaining_output_tokens=reservation.output_tokens,
             tool_concurrency=limits.tool_concurrency,
         )
         return ToolContext.model_validate({**context.model_dump(), "parent_limits": reserved_limits})
 
     def settle_budget(self, delegation_id: str, result: RunResult) -> None:
         """Return only confirmed unused budget after a child reaches a terminal result."""
-        if result.status is RunStatus.INTERRUPTED:
-            return
-        reservation = self.reservations.pop(delegation_id, None)
-        if reservation is None:
-            return
-        pool = self.parent_budgets[reservation.parent_run_id]
-        pool.remaining_turns += max(0, reservation.turns - result.usage.model_calls)
-        pool.remaining_output_tokens += max(0, reservation.output_tokens - result.usage.budget_output_tokens)
+        self.budgets.settle(
+            delegation_id,
+            None if result.status is RunStatus.TIMED_OUT else result.usage,
+            interrupted=result.status is RunStatus.INTERRUPTED,
+        )
 
     def resume_context(self, delegation_id: str, context: ToolContext) -> ToolContext:
         """Reuse the original child reservation under the current parent deadline."""
         record = self.records[delegation_id]
         if record.parent_run_id != context.run_id:
             raise OrchestrationStateError("A Worker cannot resume under a different parent Run.")
-        reservation = self.reservations.get(delegation_id)
+        reservation = self.budgets.reservations.get(delegation_id)
         if reservation is None:
             if context.parent_limits is not None:
                 raise OrchestrationStateError("A paused Worker budget reservation is missing.")

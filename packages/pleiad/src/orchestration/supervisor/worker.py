@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from pleiad.agent.agent import Agent
 from pleiad.context.selection.models import ContextBlock
 from pleiad.memory.short_memory import ShortMemory
+from pleiad.orchestration.budget import child_policy
 from pleiad.orchestration.errors import WorkerPolicyError
 from pleiad.runtime.config import RunConfig
 from pleiad.runtime.execution.control import RuntimeHandoffBinding
@@ -59,11 +60,4 @@ class Worker:
         remaining_seconds = (limits.deadline - now).total_seconds()
         if remaining_seconds <= 0:
             raise WorkerPolicyError("The parent Run deadline expired before Worker execution.")
-        return EffectivePolicy(
-            timeout_seconds=remaining_seconds,
-            max_turns=limits.remaining_turns,
-            max_output_tokens=limits.remaining_output_tokens,
-            tool_concurrency=limits.tool_concurrency,
-            grants=context.grants,
-            deadline=limits.deadline,
-        )
+        return child_policy(context)

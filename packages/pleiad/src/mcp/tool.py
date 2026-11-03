@@ -54,6 +54,11 @@ class McpTool[TransportT: ClientTransport](BaseTool):
         """Return the local policy applied around the remote call."""
         return self.policy_value
 
+    @property
+    def required_permissions(self) -> frozenset[str]:
+        """Use only host-bound permission requirements, never remote self-assertions."""
+        return self.server.tool_permissions.get(self.info.remote_name, frozenset())
+
     async def execute(self, context: ToolContext, arguments: JsonObject) -> ToolOutput:
         """Call the remote Tool once and preserve its complete observation."""
         logger.debug(

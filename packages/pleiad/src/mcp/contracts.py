@@ -1,5 +1,7 @@
 import re
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from types import MappingProxyType
 
 from fastmcp import Client
 from fastmcp.client.transports import ClientTransport
@@ -14,6 +16,7 @@ class McpServer[TransportT: ClientTransport]:
 
     code: str
     client: Client[TransportT]
+    tool_permissions: Mapping[str, frozenset[str]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Validate stable server identity and ownership of connection state."""
@@ -21,6 +24,12 @@ class McpServer[TransportT: ClientTransport]:
             raise ValueError("MCP server code must be a lowercase identifier")
         if self.client.is_connected():
             raise ValueError("MCP server client must be disconnected")
+        permissions: dict[str, frozenset[str]] = {}
+        for name, required in self.tool_permissions.items():
+            if not name.strip() or any(not permission.strip() for permission in required):
+                raise ValueError("MCP Tool names and permission requirements must be non-empty")
+            permissions[name] = frozenset(required)
+        object.__setattr__(self, "tool_permissions", MappingProxyType(permissions))
 
 
 @dataclass(frozen=True, slots=True)

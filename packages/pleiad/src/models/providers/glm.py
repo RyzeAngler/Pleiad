@@ -203,7 +203,7 @@ class AnthropicProvider:
     async def stream_events(self, request: AnthropicRequest) -> AsyncIterator[AnthropicStreamEvent]:
         """Convert GLM Anthropic stream events into protocol events."""
         payload = request_payload(request, self.model, self.provider_options)
-        payload["stream"] = True
+        payload.pop("stream")
         completed = False
         try:
             stream: Callable[..., object] = self.client.messages.stream

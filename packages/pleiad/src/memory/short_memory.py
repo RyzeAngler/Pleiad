@@ -7,7 +7,7 @@ from typing import Self
 from pleiad.errors.base import PleiadError
 from pleiad.memory.backends import in_memory, sqlite
 from pleiad.memory.turn import Turn
-from pleiad.messages.message import AssistantMessage, Message
+from pleiad.messages.message import AssistantMessage, Message, ToolMessage
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +96,26 @@ class ShortMemory:
         turn_key = "none" if result is None else result.turn_id
         logger.debug(f"memory active read completed key={self.memory_key} turn={turn_key}")
         return result
+
+    async def read_tool_result(self, message_id: str) -> ToolMessage | None:
+        """Read an original Tool observation from completed history in this scope.
+
+        Args:
+            message_id: Stable identity published in a compacted result reference.
+
+        Returns:
+            The original Tool message, or None if no completed result has that ID.
+
+        Raises:
+            ValueError: If the message identity is empty.
+        """
+        if not message_id:
+            raise ValueError("message_id must not be empty")
+        for turn in await self.read():
+            for message in turn.messages:
+                if message.message_id == message_id and isinstance(message, ToolMessage):
+                    return message
+        return None
 
     async def begin(self, agent_id: str, messages: tuple[Message, ...] = ()) -> Turn:
         """Create the next active Turn.

@@ -10,6 +10,7 @@ from pleiad.context.rendering import ContextRenderer
 from pleiad.context.selection.models import ContextView
 from pleiad.memory.turn import Turn
 from pleiad.messages.message import Message, ToolMessage, UserMessage
+from pleiad.messages.results import MAX_INLINE_TOOL_RESULT_CHARS, ToolResultReference
 from pleiad.models.contracts import Tool
 
 logger = logging.getLogger(__name__)
@@ -40,7 +41,7 @@ class ContextCompactor:
         if any(not turn.completed for turn in turns):
             raise ValueError("ContextCompactor accepts completed Turns only")
         selected_context = context_view
-        full_messages = flatten_turns(turns)
+        full_messages, large_replacements = replace_large_tool_results(flatten_turns(turns))
         status = self.check(instructions, full_messages, tools, selected_context, user_message)
         original_context_count = len(selected_context.blocks)
         while status.exceeds_window and selected_context.blocks:
@@ -63,6 +64,7 @@ class ContextCompactor:
         )
         recent_messages = flatten_turns(recent_turns)
         replacements = dict(prior_state.replacements) if prior_state is not None else {}
+        replacements.update(large_replacements)
         recent_messages, new_replacements = replace_old_tool_results(recent_messages, recent_turns)
         replacements.update(new_replacements)
 
@@ -146,10 +148,11 @@ class ContextCompactor:
         user_message: UserMessage | None,
     ) -> BudgetStatus:
         """Evaluate one complete request with a temporary User message."""
-        rendered = None if user_message is None else self.renderer.render(user_message, context_view=context_view)
         request = ContextCountInput(
             instructions=instructions,
-            messages=messages if rendered is None else (*messages, rendered),
+            messages=self.renderer.render_messages(
+                replace_large_tool_results(messages)[0], user_message=user_message, context_view=context_view
+            ),
             tools=tools,
             context_view=context_view,
         )
@@ -166,7 +169,7 @@ def replace_old_tool_results(
     turns: tuple[Turn, ...],
 ) -> tuple[tuple[Message, ...], dict[str, str]]:
     """Replace only large Tool Result bodies from non-latest retained Turns."""
-    if len(turns) < 2:
+    if not turns:
         return messages, {}
     latest_sequence = turns[-1].sequence
     replacements: dict[str, str] = {}
@@ -174,17 +177,48 @@ def replace_old_tool_results(
     turn_by_message = {message.message_id: turn for turn in turns for message in turn.messages}
     for message in messages:
         turn = turn_by_message[message.message_id]
-        if isinstance(message, ToolMessage) and turn.sequence < latest_sequence and len(message.content) > 512:
-            content = json.dumps(
-                {"compacted": True, "message_id": message.message_id, "note": "Reload the Tool observation if needed."},
-                ensure_ascii=False,
-                sort_keys=True,
-            )
+        if isinstance(message, ToolMessage) and (
+            len(message.content) > MAX_INLINE_TOOL_RESULT_CHARS
+            or (turn.sequence < latest_sequence and len(message.content) > 512)
+        ):
+            content = result_reference_content(message)
             replacements[message.message_id] = content
             updated.append(message.model_copy(update={"content": content}))
         else:
             updated.append(message)
     return tuple(updated), replacements
+
+
+def result_reference_content(message: ToolMessage) -> str:
+    """Render an executable, integrity-bearing reference to a retained observation."""
+    reference = ToolResultReference.from_message(message)
+    return json.dumps(
+        {
+            "compacted": True,
+            **reference.model_dump(mode="json"),
+            "read_tool_result": reference.read_arguments(),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def replace_large_tool_results(messages: tuple[Message, ...]) -> tuple[tuple[Message, ...], dict[str, str]]:
+    """Bound even the newest result in the request view while retaining its original."""
+    replacements = {
+        message.message_id: result_reference_content(message)
+        for message in messages
+        if isinstance(message, ToolMessage) and len(message.content) > MAX_INLINE_TOOL_RESULT_CHARS
+    }
+    return (
+        tuple(
+            message.model_copy(update={"content": replacements[message.message_id]})
+            if message.message_id in replacements
+            else message
+            for message in messages
+        ),
+        replacements,
+    )
 
 
 def add_summary(instructions: str, summary: str | None) -> str:

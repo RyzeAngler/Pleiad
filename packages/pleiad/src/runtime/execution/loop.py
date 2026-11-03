@@ -71,6 +71,7 @@ from pleiad.observability.tracing import Observability
 from pleiad.runtime.errors import HandoffConflictError, HandoffLimitError
 from pleiad.runtime.execution.control import RuntimeHandoffBinding
 from pleiad.runtime.execution.model_input import ModelInput, build_model_input, stream_model, tool_result_message
+from pleiad.runtime.execution.read_tool_result import ReadToolResultTool
 from pleiad.runtime.lifecycle.state import RunState, RunStatus, RunUsage
 from pleiad.runtime.policy import EffectivePolicy
 from pleiad.skills.contracts import Skill
@@ -196,12 +197,18 @@ class AgentLoop:
         root_name = agent.name if root_agent_name is None else root_agent_name
         current_handoff_count = handoff_count
         current_max_handoffs = max_handoffs
+        result_reader = ReadToolResultTool(memory)
+        tools = (*tools, result_reader)
         turn_scope: AbstractContextManager[Span] | None = None
         turn_span: Span | None = None
         try:
             remaining_seconds = max(0.0, (policy.deadline - datetime.now(UTC)).total_seconds())
-            async with asyncio.timeout(remaining_seconds):
+            timeout = asyncio.timeout(remaining_seconds)
+            async with timeout:
                 while True:
+                    if policy.deadline <= datetime.now(UTC):
+                        await memory.abort(current_turn_id)
+                        return LoopOutcome(RunStatus.TIMED_OUT, usage=current_usage)
                     remaining_output_tokens = policy.max_output_tokens - current_usage.budget_output_tokens
                     if remaining_output_tokens <= 0:
                         await memory.abort(current_turn_id)
@@ -267,17 +274,14 @@ class AgentLoop:
                         )
                         self.observability.finish(compaction_span, "succeeded")
                     current_compaction = compacted.state
-                    rendered_user = (
-                        None
-                        if current_user_message is None
-                        else self.context_renderer.render(current_user_message, context_view=compacted.context_view)
-                    )
                     request_instructions = add_summary(
                         instructions,
                         compacted.state.summary if compacted.state is not None else None,
                     )
-                    request_messages = (
-                        compacted.messages if rendered_user is None else (*compacted.messages, rendered_user)
+                    request_messages = self.context_renderer.render_messages(
+                        compacted.messages,
+                        user_message=current_user_message,
+                        context_view=compacted.context_view,
                     )
                     model_input = build_model_input(
                         instructions=request_instructions,
@@ -480,11 +484,13 @@ class AgentLoop:
                         target = handoff_binding.target
                         agent = target.agent
                         model = agent.model
-                        tools = target.tools
+                        tools = (*target.tools, result_reader)
                         skills = target.skills
                         agent_fingerprint = target.fingerprint
                         if handoff_binding.policy is not None:
                             policy = handoff_binding.policy
+                            remaining_seconds = max(0.0, (policy.deadline - datetime.now(UTC)).total_seconds())
+                            timeout.reschedule(asyncio.get_running_loop().time() + remaining_seconds)
                         next_turn = await memory.begin(agent.name)
                         current_turn_id = next_turn.turn_id
                         await self.emit(
@@ -505,7 +511,7 @@ class AgentLoop:
                         run_id=run_id,
                         parent_run_id=parent_run_id,
                         parent_deadline=policy.deadline.isoformat(),
-                        parent_remaining_turns=max(1, policy.max_turns - current_usage.model_calls),
+                        parent_remaining_turns=max(0, policy.max_turns - current_usage.model_calls),
                         parent_remaining_output_tokens=max(
                             0, policy.max_output_tokens - current_usage.budget_output_tokens
                         ),

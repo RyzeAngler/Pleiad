@@ -1,15 +1,18 @@
 import asyncio
+from collections.abc import AsyncIterator, Mapping
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from pleiad.agent.agent import Agent
-from pleiad.contracts import CapabilityGrants, ToolRef
+from pleiad.contracts import CapabilityGrants, JsonObject, ToolRef
 from pleiad.events.supervisor import WorkerCompletedEvent
 from pleiad.memory.short_memory import ShortMemory
 from pleiad.messages.message import AssistantMessage
+from pleiad.models.openai.request import OpenAIRequest
 from pleiad.models.openai.response import (
     OpenAIStreamChoice,
     OpenAIStreamChunk,
@@ -17,17 +20,22 @@ from pleiad.models.openai.response import (
     OpenAIStreamFunction,
     OpenAIStreamToolCall,
 )
+from pleiad.orchestration.budget import BudgetLedger, BudgetState
 from pleiad.orchestration.errors import (
     OrchestrationConfigurationError,
     OrchestrationStateError,
     WorkerBudgetError,
     WorkerPolicyError,
 )
+from pleiad.orchestration.graph.executor import GraphExecutor
+from pleiad.orchestration.graph.graph import Graph
+from pleiad.orchestration.graph.node import Node
+from pleiad.orchestration.graph.state import GraphStatus
 from pleiad.orchestration.supervisor.supervisor import Supervisor
 from pleiad.orchestration.supervisor.tools import DelegationTool, as_tool, submit_worker, wait_workers
 from pleiad.orchestration.supervisor.worker import Worker
 from pleiad.runtime.config import RunConfig
-from pleiad.runtime.lifecycle.state import RunStatus
+from pleiad.runtime.lifecycle.state import RunStatus, RunUsage
 from pleiad.tools.contracts import ParentRunLimits, ToolCall, ToolContext, ToolDescriptor, ToolResult
 from pleiad.tools.interruption import InterruptionResponse, ToolInterruption
 from pleiad.tools.runtime import ToolRuntime
@@ -361,7 +369,7 @@ def test_parallel_workers_share_and_settle_parent_budget(tmp_path: Path) -> None
         async with supervisor:
             first = await supervisor.submit_worker("first", "task", context)
             second = await supervisor.submit_worker("second", "task", context)
-            reserved = tuple(sorted(item.turns for item in supervisor.reservations.values()))
+            reserved = tuple(sorted(item.turns for item in supervisor.budgets.reservations.values()))
             first_id = first["delegation_id"]
             second_id = second["delegation_id"]
             assert isinstance(first_id, str)
@@ -373,8 +381,114 @@ def test_parallel_workers_share_and_settle_parent_budget(tmp_path: Path) -> None
     reserved, delegation_ids = asyncio.run(exercise())
 
     assert reserved == (1, 2)
-    assert all(delegation_id not in supervisor.reservations for delegation_id in delegation_ids)
-    assert supervisor.parent_budgets["parent-run"].remaining_turns == 1
+    assert all(delegation_id not in supervisor.budgets.reservations for delegation_id in delegation_ids)
+    assert supervisor.budgets.pools["parent-run"].remaining_turns == 1
+
+
+@pytest.mark.parametrize("stale_context", [False, True])
+def test_later_workers_share_only_output_budget_left_after_new_parent_consumption(
+    tmp_path: Path, stale_context: bool
+) -> None:
+    model = FakeOpenAIModel(tuple(text_batch("done", f"child-{index}") for index in range(3)))
+    runner, agent = make_runner(model, tmp_path)
+    worker = Worker("worker", agent, runner, config=RunConfig(max_turns=2, max_output_tokens=10))
+    supervisor = Supervisor((worker,))
+    limits = ParentRunLimits(
+        deadline=datetime.now(UTC) + timedelta(minutes=1),
+        remaining_turns=10,
+        remaining_output_tokens=20,
+        tool_concurrency=1,
+    )
+    initial = ToolContext(call_id="first-call", run_id="parent", parent_limits=limits)
+    later = initial.model_copy(
+        update={"parent_limits": limits.model_copy(update={"remaining_turns": 8, "remaining_output_tokens": 6})}
+    )
+
+    async def scenario() -> None:
+        for context in (initial, later, initial if stale_context else later):
+            result = await supervisor.run_worker(worker, "work", context)
+            assert result.status is RunStatus.SUCCEEDED
+
+    asyncio.run(scenario())
+
+    assert [request.max_completion_tokens for request in model.requests] == [10, 5, 4]
+
+
+def test_later_worker_cannot_spend_turn_budget_consumed_by_parent_and_previous_child(tmp_path: Path) -> None:
+    model = FakeOpenAIModel((text_batch("first", "first"), text_batch("must not run", "second")))
+    runner, agent = make_runner(model, tmp_path)
+    worker = Worker("worker", agent, runner, config=RunConfig(max_turns=2, max_output_tokens=10))
+    supervisor = Supervisor((worker,))
+    limits = ParentRunLimits(
+        deadline=datetime.now(UTC) + timedelta(minutes=1),
+        remaining_turns=4,
+        remaining_output_tokens=20,
+        tool_concurrency=1,
+    )
+    initial = ToolContext(call_id="first-call", run_id="parent", parent_limits=limits)
+    later = initial.model_copy(update={"parent_limits": limits.model_copy(update={"remaining_turns": 1})})
+
+    async def scenario() -> None:
+        first = await supervisor.run_worker(worker, "first", initial)
+        assert first.status is RunStatus.SUCCEEDED
+        with pytest.raises(WorkerBudgetError):
+            await supervisor.run_worker(worker, "must not run", later)
+
+    asyncio.run(scenario())
+
+    assert len(model.requests) == 1
+
+
+def test_parent_consumption_during_reserved_worker_is_not_refunded_as_unused_child_budget(tmp_path: Path) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class GatedModel(FakeOpenAIModel):
+        async def stream(self, request: OpenAIRequest | Mapping[str, object]) -> AsyncIterator[OpenAIStreamChunk]:
+            started.set()
+            await release.wait()
+            async for chunk in super().stream(request):
+                yield chunk
+
+    first_model = GatedModel((text_batch("first", "first"),))
+    first_root = tmp_path / "first"
+    first_root.mkdir()
+    first_runner, first_agent = make_runner(first_model, first_root)
+    first_worker = Worker("first", first_agent, first_runner, config=RunConfig(max_turns=3, max_output_tokens=15))
+    second_model = FakeOpenAIModel((text_batch("second", "second"),))
+    second_root = tmp_path / "second"
+    second_root.mkdir()
+    second_runner, second_agent = make_runner(second_model, second_root)
+    second_worker = Worker("second", second_agent, second_runner, config=RunConfig(max_turns=2, max_output_tokens=10))
+    supervisor = Supervisor((first_worker, second_worker))
+    limits = ParentRunLimits(
+        deadline=datetime.now(UTC) + timedelta(minutes=1),
+        remaining_turns=4,
+        remaining_output_tokens=20,
+        tool_concurrency=2,
+    )
+    initial = ToolContext(call_id="first-call", run_id="parent", parent_limits=limits)
+    later = initial.model_copy(
+        update={"parent_limits": limits.model_copy(update={"remaining_turns": 3, "remaining_output_tokens": 6})}
+    )
+
+    async def scenario() -> None:
+        async with supervisor:
+            accepted = await supervisor.submit_worker("first", "hold reservation", initial)
+            await asyncio.wait_for(started.wait(), 1)
+            with pytest.raises(WorkerBudgetError):
+                await supervisor.run_worker(second_worker, "competing request", later)
+            release.set()
+            delegation_id = accepted["delegation_id"]
+            assert isinstance(delegation_id, str)
+            await supervisor.wait_worker(delegation_id)
+            completed = await supervisor.run_worker(second_worker, "after settlement", later)
+            assert completed.status is RunStatus.SUCCEEDED
+
+    asyncio.run(scenario())
+
+    assert len(second_model.requests) == 1
+    assert second_model.requests[0].max_completion_tokens == 5
 
 
 def test_worker_resume_rejects_missing_checkpoint(tmp_path: Path) -> None:
@@ -440,8 +554,8 @@ def test_paused_worker_retains_budget_until_resumed_child_finishes(tmp_path: Pat
 
     assert result.ok
     assert len(model.requests) == 2
-    assert supervisor.reservations == {}
-    assert supervisor.parent_budgets["parent-run"].remaining_turns == 1
+    assert supervisor.budgets.reservations == {}
+    assert supervisor.budgets.pools["parent-run"].remaining_turns == 1
 
 
 def test_worker_does_not_refund_output_budget_when_provider_omits_usage(tmp_path: Path) -> None:
@@ -465,8 +579,122 @@ def test_worker_does_not_refund_output_budget_when_provider_omits_usage(tmp_path
         assert result.status is RunStatus.SUCCEEDED
         assert result.usage.output_tokens is None
         assert result.usage.budget_output_tokens == 5
-        assert supervisor.parent_budgets["parent"].remaining_output_tokens == 0
+        assert supervisor.budgets.pools["parent"].remaining_output_tokens == 0
         with pytest.raises(WorkerBudgetError):
             await supervisor.run_worker(worker, "more", context)
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(("turns", "tokens"), [(2, 1), (1, 2)])
+def test_saved_child_budget_rejects_allowance_larger_than_its_parent(turns: int, tokens: int) -> None:
+    with pytest.raises(ValidationError, match="cannot exceed the parent allowance"):
+        BudgetState(
+            remaining_turns=turns,
+            remaining_output_tokens=tokens,
+            parent_remaining_turns=1,
+            parent_remaining_output_tokens=1,
+        )
+
+
+def test_restored_child_budget_does_not_replenish_a_previously_consumed_allowance(tmp_path: Path) -> None:
+    model = FakeOpenAIModel((text_batch("first", "first"), text_batch("second", "second")))
+    runner, agent = make_runner(model, tmp_path)
+    worker = Worker("worker", agent, runner, config=RunConfig(max_turns=3, max_output_tokens=10))
+    first = Supervisor((worker,))
+    context = ToolContext(
+        call_id="delegate",
+        run_id="parent",
+        parent_limits=ParentRunLimits(
+            deadline=datetime.now(UTC) + timedelta(minutes=1),
+            remaining_turns=3,
+            remaining_output_tokens=10,
+            tool_concurrency=1,
+        ),
+    )
+
+    async def scenario() -> None:
+        await first.run_worker(worker, "first", context)
+        saved = first.budgets.snapshot("parent")
+        assert saved is not None
+        restored = BudgetLedger()
+        restored.restore("parent", BudgetState.model_validate_json(saved.model_dump_json()))
+        second = Supervisor((worker,), budgets=restored)
+        await second.run_worker(worker, "second", context)
+        latest = restored.snapshot("parent")
+        assert latest is not None
+        restored.restore("parent", latest)
+        with pytest.raises(OrchestrationStateError, match="differs from the live"):
+            restored.restore("parent", saved)
+
+    asyncio.run(scenario())
+
+    assert [request.max_completion_tokens for request in model.requests] == [10, 9]
+
+
+def test_child_budget_charges_reported_provider_overage_instead_of_forgiving_it() -> None:
+    ledger = BudgetLedger()
+    limits = ParentRunLimits(
+        deadline=datetime.now(UTC) + timedelta(minutes=1),
+        remaining_turns=2,
+        remaining_output_tokens=100,
+        tool_concurrency=1,
+    )
+    assert ledger.reserve("child", "parent", limits, 1, 50) is not None
+    ledger.settle(
+        "child", RunUsage(input_tokens=1, output_tokens=75, total_tokens=76, budget_output_tokens=75, model_calls=1)
+    )
+    saved = ledger.snapshot("parent")
+    assert saved is not None and saved.remaining_output_tokens == 25
+
+
+@pytest.mark.parametrize("kind", ["graph", "worker"])
+@pytest.mark.parametrize("exhausted", ["turns", "output"])
+def test_parent_final_allowance_does_not_fabricate_budget_for_graph_or_worker_children(
+    tmp_path: Path,
+    kind: str,
+    exhausted: str,
+) -> None:
+    child_root = tmp_path / "child"
+    child_root.mkdir()
+    child_model = FakeOpenAIModel((text_batch("must not run", "child"),))
+    child_runner, child_agent = make_runner(child_model, child_root)
+    supervisor = Supervisor((Worker("child", child_agent, child_runner),))
+    graph = Graph(graph_id="final-allowance", nodes=(Node("child", agent=child_agent, runner=child_runner),))
+    contexts: list[ToolContext] = []
+    accepted: list[bool] = []
+
+    async def delegate(context: ToolContext, arguments: JsonObject) -> JsonObject:
+        contexts.append(context)
+        if kind == "graph":
+            child = await GraphExecutor().execute(graph, {}, context=context)
+            allowed = child.status is GraphStatus.SUCCEEDED
+            accepted.append(allowed)
+            return {"accepted": allowed, "error_code": child.error_code}
+        try:
+            await supervisor.run_worker("child", "delegate", context)
+        except WorkerBudgetError as error:
+            accepted.append(False)
+            return {"accepted": False, "error_code": error.code}
+        accepted.append(True)
+        return {"accepted": True}
+
+    parent_root = tmp_path / "parent"
+    parent_root.mkdir()
+    parent_model = FakeOpenAIModel((tool_batch("echo", '{"value":"delegate"}', "delegate"),))
+    parent_runner, parent_agent = make_runner(parent_model, parent_root, delegate)
+    config = RunConfig(max_turns=1 if exhausted == "turns" else 3, max_output_tokens=1 if exhausted == "output" else 10)
+    result = asyncio.run(
+        parent_runner.run(
+            parent_agent, "Delegate at the boundary", memory=ShortMemory.in_memory("parent"), config=config
+        )
+    )
+
+    assert result.status is RunStatus.LIMIT_REACHED
+    assert len(contexts) == 1 and contexts[0].parent_limits is not None
+    if exhausted == "turns":
+        assert contexts[0].parent_limits.remaining_turns == 0
+    else:
+        assert contexts[0].parent_limits.remaining_output_tokens == 0
+    assert accepted == [False]
+    assert child_model.requests == []

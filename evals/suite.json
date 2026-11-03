@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "case_id": "stock-shortages",
+      "objective": "Read orders.csv and stock.csv. For each SKU calculate max(ordered minus available, 0). Return only a JSON object mapping each SKU to its integer shortage.",
+      "files": {
+        "orders.csv": "sku,ordered\nA,5\nB,7\n",
+        "stock.csv": "sku,available\nA,2\nB,4\n"
+      },
+      "expected": {"A": 3, "B": 3}
+    },
+    {
+      "case_id": "incident-evidence",
+      "objective": "Use runbook.md and events.jsonl. Count errors in the runbook's inclusive time window and return JSON with integer errors, sorted affected_services, and sorted evidence file paths.",
+      "files": {
+        "runbook.md": "Incident window: 2026-01-01T10:00:00Z through 2026-01-01T10:05:00Z. Only level=error counts. Evidence must name both this runbook and the event file.\n",
+        "events.jsonl": "{\"time\":\"2026-01-01T10:00:00Z\",\"level\":\"error\",\"service\":\"billing\"}\n{\"time\":\"2026-01-01T10:02:00Z\",\"level\":\"error\",\"service\":\"worker\"}\n{\"time\":\"2026-01-01T10:03:00Z\",\"level\":\"info\",\"service\":\"billing\"}\n{\"time\":\"2026-01-01T12:00:00Z\",\"level\":\"error\",\"service\":\"gateway\"}\n"
+      },
+      "expected": {"errors": 2, "affected_services": ["billing", "worker"], "evidence": ["events.jsonl", "runbook.md"]}
+    },
+    {
+      "case_id": "request-local-promotion",
+      "objective": "Read policy.md and order.json, then apply the business input's promotion threshold. Return only JSON with integer discount, shipping, and total.",
+      "files": {
+        "policy.md": "A subtotal at or above promotion_threshold gets a discount of 10. Use promotion_threshold from business input; otherwise use 120. Shipping is 0 if the subtotal AFTER discount is at least 95, otherwise 10. Total is subtotal minus discount plus shipping.\n",
+        "order.json": "{\"subtotal\":100}\n"
+      },
+      "input": {"promotion_threshold": 80},
+      "expected": {"discount": 10, "shipping": 10, "total": 100}
+    }
+  ]
+}

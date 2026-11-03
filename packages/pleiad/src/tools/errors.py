@@ -7,6 +7,7 @@ class ToolErrorCode(StrEnum):
     """Stable error codes owned by the Tool component."""
 
     NOT_FOUND = "tool.not_found"
+    RESULT_NOT_FOUND = "tool.result.not_found"
     INVALID_ARGUMENTS = "tool.arguments.invalid"
     PERMISSION_DENIED = "tool.permission.denied"
     TIMEOUT = "tool.execution.timed_out"
@@ -61,6 +62,20 @@ class InvalidToolArgumentsError(ToolError):
             message: Diagnostic description of the invalid arguments.
         """
         super().__init__(ToolErrorCode.INVALID_ARGUMENTS, message)
+
+
+class ToolResultNotFoundError(ToolError):
+    """Report a result reference outside the current completed history."""
+
+    def __init__(
+        self, message: str = "The Tool result is not available in this conversation's completed history."
+    ) -> None:
+        """Create a missing result error.
+
+        Args:
+            message: Diagnostic description without exposing another memory scope.
+        """
+        super().__init__(ToolErrorCode.RESULT_NOT_FOUND, message)
 
 
 class ToolPermissionDeniedError(ToolError):

@@ -10,6 +10,25 @@ from pleiad.mcp.discovery import discover_tools
 from pleiad.mcp.errors import McpErrorCode
 
 
+def test_discovery_rejects_host_permissions_for_a_missing_remote_tool() -> None:
+    app = FastMCP("permissions")
+
+    @app.tool
+    def read() -> str:
+        return "value"
+
+    async def scenario() -> None:
+        server = McpServer(
+            "permissions", Client(FastMCPTransport(app)), tool_permissions={"misspelled": frozenset({"resource.read"})}
+        )
+        with pytest.raises(SystemFault) as caught:
+            await discover_tools(server)
+        assert caught.value.code == McpErrorCode.TOOL_SCHEMA_INVALID
+        assert isinstance(caught.value.__cause__, ValueError)
+
+    asyncio.run(scenario())
+
+
 def test_discovery_namespaces_tools_without_executing_them() -> None:
     calls = 0
     app = FastMCP("test-server")

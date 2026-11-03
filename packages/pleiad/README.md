@@ -78,6 +78,26 @@ message and dynamic references remain separate from `ShortMemory`; context
 budgets and compaction are evaluated for each model request at complete Turn
 boundaries.
 
+Dynamic references are rendered for every request, including Tool continuations
+and checkpoint resumes. The request view preserves message order while the
+original User messages remain unchanged in ShortMemory.
+
+Runtime also binds `read_tool_result` to the invocation's ShortMemory. It is a
+reserved SDK Tool; hosts do not register it or add a capability grant for it.
+Omit `message_id` to list bounded, newest-first result references, using
+`after_message_id` to continue the list. Supply `message_id`, `start_char`, and
+`max_chars` to read a character page (4,000 by default, at most 8,000). References
+include the original UTF-8 SHA-256 digest and character count. They cannot select
+another memory ID or a filesystem path.
+
+Tool observations retain their complete original content in ShortMemory. The
+model request replaces observations above 64,000 characters with executable
+read references, including the most recent result. History compaction can also
+replace older retained observations. Even after an entire Turn leaves the
+request view, its results remain discoverable through `read_tool_result` while
+the host retains that memory. Weave's existing SQLite memory binding supplies
+durability; no separate result database or model-facing host path is required.
+
 `Runner` owns the ShortMemory-backed Model → Tool → Model loop. Bind concrete
 model clients on the `Agent`, then supply a `ShortMemory`, `RunConfig`, and the
 host's `ToolRegistry`, `SkillLoader`, and `ToolRuntime`:
@@ -194,6 +214,13 @@ Handoff switches the active Agent inside the same Run and
 ShortMemory. Graph uses `Graph`, `Node`, and `Edge`; Agent nodes call the
 existing Runner while normal async functions run directly.
 
+Pass the invoking `ToolContext` to `GraphExecutor.execute` for nested Agent
+Nodes. The executor intersects grants, deadlines, concurrency, and remaining
+allowances with the parent; sibling Nodes reserve disjoint child allowances
+and wait for confirmed refunds. Repeated Graph calls reuse the parent Run's
+pool. GraphExecutor and Supervisor can share an explicit `BudgetLedger` when
+the host combines both forms of delegation.
+
 ## Data model boundaries
 
 Pleiad uses Pydantic models for untrusted data, caller-authored configuration,
@@ -230,6 +257,15 @@ at their fixed virtual paths. Skill scripts use the container's own interpreter
 and preinstalled dependencies; the SDK does not install packages or inherit
 host credentials inside the container.
 
+Host file Tools use directory descriptors and refuse symbolic links at every
+path component on Linux and macOS. Reads reject non-regular files and retain at
+most the configured byte limit plus one detection byte. Filesystem work runs
+off the event loop, and cancellation waits for owned cleanup. Writes stage
+content before rechecking the expected digest under a directory advisory lock;
+SDK processes using that lock serialize their writes. Uncoordinated external
+editors do not participate in that lock, so conditional replacement is not an
+atomic compare-and-swap against arbitrary external writers.
+
 ## Graph validation and recovery
 
 Graph and Node schemas reject external references before execution. JSON Pointer
@@ -237,11 +273,35 @@ array indices use RFC 6901 syntax: `0` or an ASCII decimal integer without a
 leading zero; signed indices are rejected. Branch activation follows the
 validated Node state, including output-schema failures.
 
+An external NodeExecutor may return `PAUSED`. When its downstream Nodes cannot
+advance and no tasks remain active, GraphExecutor returns `PAUSED` with those
+Nodes still pending. Restoring that state retains completed sibling outputs.
+Agent Node interruption checkpoints require host orchestration and are not
+implicitly converted into a recoverable Agent Node result.
+
+Agent Node `LIMIT_REACHED` and `TIMED_OUT` outcomes are confirmed failed Nodes
+with their actual SDK Run identity, status, and usage. `GraphResult.child_usage`
+and `GraphState.child_usage` report child measurements separately from the
+parent's own usage. Unknown measurements remain null. GraphState requires this
+field; older serialized states without it are rejected.
+
 A recovery fingerprint includes graph input/output schemas, concurrency and
 timeout settings, and node side-effect declarations. Change a graph definition
 by creating a new revision instead of restoring state against a changed contract.
 Executable handler code and external model behavior are host bindings; the
 host must keep them stable when restoring the same graph revision.
+
+## MCP host authorization
+
+`McpServer` accepts `tool_permissions`, a host-owned mapping from remote Tool
+name to required capability grants. Discovery freezes that mapping and rejects
+requirements naming absent Tools. McpTool exposes the requirements to the same
+ToolRuntime execution/resume checks used by local Tools. Unspecified Tools keep
+their existing binding behavior; remote annotations never grant permissions.
+Normal request cancellation propagates through FastMCP and closes the owned
+connection. Remote background Task lifecycle and durable input/elicitation
+bridges remain outside this adapter; task-only Tools are explicitly rejected.
+Weave does not yet configure MCP servers through its workspace catalog.
 
 ## Reported usage and output budget
 
@@ -261,8 +321,22 @@ subsequent request uses only the remaining `RunConfig.max_output_tokens`
 allowance. Exhausted allowance prevents a further model call and returns
 `LIMIT_REACHED`; a final answer already received can still succeed.
 
-Worker budget settlement refunds only the allowance left after the child's
-budget charges. Tool completion and checkpoint resume preserve those charges.
+Worker and Graph budget settlement refunds only confirmed unused allowance.
+Unknown child outcomes keep their full reservations charged. Tool completion
+and checkpoint resume preserve those charges. The parent limits supplied to
+orchestration measure the parent's own remaining budget. The shared ledger
+accounts for child reservations and charges separately;
+later decreases in the parent's limits debit that shared pool exactly once.
+In-flight reservations remain held even when newly observed parent consumption
+exhausts admission capacity. A Handoff also reschedules the active timeout when
+the target Agent imposes an earlier deadline.
+
+These limits apply to SDK invocations and child admission; they do not define
+an aggregate spending cap for a durable product Execution. A host restoring a
+parent after child delegation must persist `GraphExecutor.budget_state` along
+with its Run checkpoint and call `restore_budget` before continuing. BudgetState
+is settled allowance, not measured usage; active reservations cannot be saved
+as settled state, and restoring a different live pool is rejected.
 Run checkpoints now use version 2; version 1 checkpoints are rejected because
 they do not establish this accounting contract. No old-state migration or
 compatibility alias is supplied.

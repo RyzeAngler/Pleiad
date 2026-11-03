@@ -6,12 +6,71 @@ from fastmcp.client.transports import FastMCPTransport
 from fastmcp.exceptions import ToolError
 from mcp_types import CallToolResult, TextContent
 
+from pleiad.contracts import CapabilityGrants
 from pleiad.mcp.contracts import McpServer
 from pleiad.mcp.discovery import discover_tools
 from pleiad.mcp.errors import McpErrorCode, McpToolCallFault
 from pleiad.tools.contracts import ToolCall, ToolContext, ToolResult
 from pleiad.tools.errors import ToolErrorCode
 from pleiad.tools.runtime import ToolRuntime
+
+
+def test_host_bound_mcp_permissions_block_side_effects_until_the_current_run_is_granted() -> None:
+    app = FastMCP("counter")
+    state = {"counter": 0}
+
+    @app.tool
+    def increment() -> int:
+        state["counter"] += 1
+        return state["counter"]
+
+    async def scenario() -> None:
+        permissions = {"increment": frozenset({"counter.write"})}
+        server = McpServer("counter", Client(FastMCPTransport(app)), tool_permissions=permissions)
+        permissions.clear()
+        tool = (await discover_tools(server))[0]
+        call = ToolCall(call_id="increment", tool_code=tool.descriptor.code)
+        runtime = ToolRuntime()
+        denied = await runtime.execute(tool, call, ToolContext(call_id=call.call_id))
+        assert isinstance(denied, ToolResult) and not denied.ok
+        assert denied.error_code == ToolErrorCode.PERMISSION_DENIED
+        assert state["counter"] == 0
+        granted = await runtime.execute(
+            tool,
+            call,
+            ToolContext(call_id=call.call_id, grants=CapabilityGrants(capabilities=frozenset({"counter.write"}))),
+        )
+        assert isinstance(granted, ToolResult) and granted.ok
+        assert state["counter"] == 1
+
+    asyncio.run(scenario())
+
+
+def test_cancelling_a_normal_mcp_request_propagates_and_finishes_remote_cleanup() -> None:
+    app = FastMCP("cancellation")
+    started = asyncio.Event()
+    stopped = asyncio.Event()
+
+    @app.tool
+    async def wait_for_cancel() -> str:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+            return "unreachable"
+        finally:
+            stopped.set()
+
+    async def scenario() -> None:
+        tool = (await discover_tools(McpServer("cancel", Client(FastMCPTransport(app)))))[0]
+        task = asyncio.create_task(tool.execute(ToolContext(call_id="cancel"), {}))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        async with asyncio.timeout(5):
+            await stopped.wait()
+
+    asyncio.run(scenario())
 
 
 def test_mcp_tool_preserves_all_remote_content_and_structured_content() -> None:

@@ -82,7 +82,7 @@ class AnthropicProvider:
     async def stream(self, request: AnthropicRequest) -> AsyncIterator[AnthropicStreamEvent]:
         """Convert and stream Anthropic message events."""
         payload = request_payload(request, self.model, self.provider_options)
-        payload["stream"] = True
+        payload.pop("stream")
         completed = False
         try:
             stream: Callable[..., object] = self.client.messages.stream

@@ -42,7 +42,7 @@ from pleiad.observability.tracing import Observability
 from pleiad.runtime.config import RunConfig
 from pleiad.runtime.errors import RuntimeStateError
 from pleiad.runtime.execution.control import RuntimeAgentBinding, RuntimeHandoffBinding
-from pleiad.runtime.execution.loop import AgentLoop, LoopOutcome, add_tool_usage
+from pleiad.runtime.execution.loop import AgentLoop, LoopOutcome, abort_safely, add_tool_usage
 from pleiad.runtime.execution.model_input import tool_result_message
 from pleiad.runtime.execution.stream import RunStream
 from pleiad.runtime.lifecycle.result import RunResult
@@ -299,20 +299,25 @@ class Runner:
             handoff_count = checkpoint.handoff_count
             is_new_run = False
         if is_new_run:
-            await self.emit(RunStartedEvent(run_id=run_id, agent_name=agent.name), event_sink)
-        if is_new_run and user_message is not None:
-            await self.emit(
-                TurnStartedEvent(run_id=run_id, turn_id=active_turn.turn_id, agent_name=agent.name), event_sink
-            )
-            await self.emit(
-                MessageCompletedEvent(
-                    run_id=run_id,
-                    turn_id=active_turn.turn_id,
-                    agent_name=agent.name,
-                    message=user_message,
-                ),
-                event_sink,
-            )
+            try:
+                await self.emit(RunStartedEvent(run_id=run_id, agent_name=agent.name), event_sink)
+                await self.emit(
+                    TurnStartedEvent(run_id=run_id, turn_id=active_turn.turn_id, agent_name=agent.name), event_sink
+                )
+                if user_message is not None:
+                    await self.emit(
+                        MessageCompletedEvent(
+                            run_id=run_id,
+                            turn_id=active_turn.turn_id,
+                            agent_name=agent.name,
+                            message=user_message,
+                        ),
+                        event_sink,
+                    )
+            except asyncio.CancelledError:
+                await abort_safely(memory, active_turn.turn_id, "startup_cancelled")
+                await self.emit(RunCancelledEvent(run_id=run_id), event_sink)
+                raise
         logger.info(f"run started run={run_id} agent={agent.name}")
         with self.observability.span(
             RUN_NAME,
@@ -397,6 +402,10 @@ class Runner:
     def resolve_binding(self, agent: Agent) -> RuntimeAgentBinding:
         """Resolve one Agent into the Runtime binding used for a Run."""
         tools, skills = self.resolve(agent)
+        if any(
+            tool.descriptor.name == "read_tool_result" or tool.descriptor.code == "read_tool_result" for tool in tools
+        ):
+            raise AgentConfigurationError("read_tool_result is reserved for the Runtime-bound result reader.")
         return RuntimeAgentBinding(
             agent=agent,
             tools=tools,
@@ -430,6 +439,8 @@ class Runner:
         names: set[tuple[str, str]] = set()
         prepared: list[RuntimeHandoffBinding] = []
         for handoff in handoffs:
+            if handoff.name == "read_tool_result":
+                raise AgentConfigurationError("read_tool_result is reserved for the Runtime-bound result reader.")
             identity = (handoff.source_agent_name, handoff.name)
             if identity in names:
                 raise AgentConfigurationError(f"Duplicate Handoff binding: {handoff.name}.")
