@@ -47,3 +47,10 @@ workspace/runtime/traces/*
 
 # SDK command scratch files are runtime data.
 workspace/runtime/scratch/
+workspace/runtime/workspaces/
+
+# Frontend dependencies and local test output.
+node_modules/
+apps/weave/web/coverage/
+apps/weave/web/test-results/
+apps/weave/src/web/assets/

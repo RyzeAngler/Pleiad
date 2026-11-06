@@ -84,6 +84,19 @@ class JsonRecordRepository[RecordT: ContractModel]:
                 "weave.system_storage", str({"path": str(self.root), "exception": type(error).__name__})
             ) from error
 
+    def delete(self, record_id: str) -> None:
+        """Remove one owned runtime record, allowing an interrupted cleanup to retry."""
+        path = self.root / f"{record_id}.json"
+        if path.parent != self.root:
+            raise ValueError("Record identity must not contain path components")
+        try:
+            with self.lock:
+                path.unlink(missing_ok=True)
+        except OSError as error:
+            raise SystemFault(
+                "weave.system_storage", str({"path": str(path), "exception": type(error).__name__})
+            ) from error
+
 
 class ExecutionRepository:
     """Persist Execution rows and ordered events in one SQLite journal."""
@@ -271,6 +284,26 @@ class ExecutionRepository:
         except (OSError, sqlite3.Error, ValueError) as exc:
             raise self.storage_error(exc) from exc
 
+    def list_records(self, conversation_id: str | None = None) -> tuple[ExecutionRecord, ...]:
+        """Read execution history in creation order, optionally within one conversation.
+
+        Args:
+            conversation_id: Exact conversation identity to select, or all conversations.
+
+        Returns:
+            Validated durable execution records in ascending creation order.
+
+        Raises:
+            SystemFault: If the journal cannot be read or a record is malformed.
+        """
+        try:
+            with closing(self.connect()) as connection:
+                rows = connection.execute("SELECT record_json FROM executions ORDER BY rowid").fetchall()
+            records = tuple(ExecutionRecord.model_validate_json(row["record_json"]) for row in rows)
+            return tuple(item for item in records if conversation_id is None or item.conversation_id == conversation_id)
+        except (OSError, sqlite3.Error, ValueError) as error:
+            raise self.storage_error(error) from error
+
     def list_nonterminal(self) -> tuple[ExecutionRecord, ...]:
         """Return persisted Executions that have not reached a terminal status."""
         terminal = tuple(
@@ -399,6 +432,19 @@ class ExecutionRepository:
 
     def storage_error(self, exc: Exception) -> SystemFault:
         return SystemFault("weave.system_storage", str({"path": str(self.path), "exception": exc.__class__.__name__}))
+
+    def delete(self, execution_ids: frozenset[str]) -> None:
+        """Remove settled executions and their events and recovery states atomically."""
+        try:
+            with closing(self.connect()) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                for execution_id in execution_ids:
+                    connection.execute("DELETE FROM execution_resume_states WHERE execution_id = ?", (execution_id,))
+                    connection.execute("DELETE FROM execution_events WHERE execution_id = ?", (execution_id,))
+                    connection.execute("DELETE FROM executions WHERE execution_id = ?", (execution_id,))
+                connection.commit()
+        except sqlite3.Error as error:
+            raise self.storage_error(error) from error
 
 
 class GraphRunRepository(JsonRecordRepository[GraphRunRecord]):

@@ -66,6 +66,19 @@ repos:
         entry: uv run --project apps/weave --frozen lint-imports --config .importlinter
         language: system
         pass_filenames: false
+      - id: weave-web-typecheck
+        name: Weave Web TypeScript
+        entry: npm --prefix apps/weave/web run typecheck
+        language: system
+        files: ^apps/weave/web/
+        pass_filenames: false
+      - id: weave-web-tests
+        name: Weave Web behavior tests
+        entry: npm --prefix apps/weave/web test
+        language: system
+        files: ^apps/weave/web/
+        pass_filenames: false
+        stages: [pre-push]
       - id: pleiad-tests
         name: Pleiad behavior tests
         entry: uv run --directory packages/pleiad --frozen pytest -q -m 'not oci and not provider_e2e'

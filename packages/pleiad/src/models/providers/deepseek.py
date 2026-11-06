@@ -1,3 +1,4 @@
+import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from types import TracebackType
 from typing import Protocol, runtime_checkable
@@ -15,7 +16,7 @@ from pleiad.models.errors import (
     ModelResponseError,
     classify_provider_error,
 )
-from pleiad.models.openai.request import OpenAIRequest
+from pleiad.models.openai.request import OpenAIMessage, OpenAIRequest
 from pleiad.models.openai.response import OpenAIResponse, OpenAIStreamChunk, parse_stream_chunk
 from pleiad.models.openai.response import parse_response as parse_openai_response
 
@@ -228,8 +229,49 @@ def request_payload(
 ) -> JsonObject:
     """Build a protocol payload and classify request conversion failures."""
     try:
+        if isinstance(request, OpenAIRequest):
+            request = json_mode_request(request)
         return request.payload(model=model, provider_options=provider_options)
     except ValueError as error:
         raise ModelRequestError(
             "The model request cannot be converted for the provider.",
         ) from error
+
+
+def json_mode_request(request: OpenAIRequest) -> OpenAIRequest:
+    """Map structured output to DeepSeek Chat Completions JSON mode.
+
+    DeepSeek Chat Completions does not accept the OpenAI ``json_schema``
+    response format. Send JSON mode and the schema as model instructions on
+    the first request; Runtime still validates the final Agent output. This
+    conversion does not claim server-side strict-schema enforcement.
+
+    Args:
+        request: Validated OpenAI protocol request.
+
+    Returns:
+        The unchanged request, or a detached JSON-mode request with its schema.
+
+    Raises:
+        ValueError: If a structured-output envelope has no object schema.
+    """
+    response_format = request.response_format
+    if response_format is None or response_format.get("type") != "json_schema":
+        return request
+    definition = response_format.get("json_schema")
+    if not isinstance(definition, dict):
+        raise ValueError("json_schema response format requires a schema definition")
+    schema = definition.get("schema")
+    if not isinstance(schema, dict):
+        raise ValueError("json_schema response format requires an object schema")
+    instruction = OpenAIMessage(
+        role="system",
+        content=(
+            "Return the final answer as a JSON object matching this JSON Schema. "
+            "Do not wrap the JSON in markdown or add explanatory text.\n"
+            f"{json.dumps(schema, ensure_ascii=False)}"
+        ),
+    )
+    return request.model_copy(
+        update={"messages": [instruction, *request.messages], "response_format": {"type": "json_object"}}
+    )

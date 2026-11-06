@@ -57,6 +57,16 @@ Use `AnthropicModelClient` with the same `provider` value when the caller's
 body is an Anthropic Messages request. There is no public `protocol` argument
 and no public common model client.
 
+DeepSeek Chat Completions accepts JSON mode, but not OpenAI's `json_schema`
+response format. Its provider binding maps a structured-output request to
+`json_object` and includes the schema in system instructions before sending it.
+This is the normal request mapping, not an error-triggered retry. The provider
+does not enforce the schema; an Agent's final output is still validated by
+Runtime, and invalid output fails the Run. Direct model-client callers must
+validate the returned JSON against their schema themselves. See DeepSeek's
+[Chat Completions contract](https://api-docs.deepseek.com/api/create-chat-completion/)
+and [JSON Output guide](https://api-docs.deepseek.com/guides/json_mode/).
+
 ## Agent declarations
 
 `Agent` is a frozen declaration of a model, prompt, capabilities, selected Skills,
@@ -242,6 +252,16 @@ finite execution and cleanup budgets, resource limits, and an explicit
 environment allowlist. Requests provide either `argv` or an explicitly allowed
 `shell_command`; the model-visible `command` Tool does not choose images,
 mounts, credentials, or OCI flags.
+
+Before creating a container, the backend checks the selected engine with
+`docker info` or `podman info` within the request's execution budget. An
+unreachable engine raises `sandbox.runtime.unavailable` without entering
+container cleanup. Once creation has been attempted, cleanup still resolves
+the owned container even if the create command returned no ID. If execution
+and cleanup both fail, `sandbox.cleanup.failed` reports both failures and
+preserves the execution exception as its cause. Creation and exit-status
+inspection failures include up to 2 KiB of runtime stderr for diagnosis;
+request arguments, environment values, stdin, and stdout are not appended.
 
 Each request creates one uniquely named, SDK-owned Docker or Podman container,
 attaches to it, inspects its real exit status, and removes it by the confirmed

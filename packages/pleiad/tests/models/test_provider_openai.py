@@ -1,10 +1,12 @@
 import asyncio
+import json
 from collections.abc import Callable
 from types import SimpleNamespace
 
 import pytest
 from pydantic import SecretStr
 
+from pleiad.models.errors import ModelRequestError
 from pleiad.models.openai.client import OpenAIProviderPort
 from pleiad.models.openai.request import OpenAIRequest
 from pleiad.models.openai.response import OpenAIStreamChunk
@@ -145,6 +147,95 @@ def test_openai_compatible_providers_send_chat_completions_through_openai_sdk(
     assert instance.settings["base_url"] == expected_base_url
     assert instance.completions.requests[0]["model"] == "test-model"
     assert instance.completions.requests[0]["reasoning_effort"] == "low"
+
+
+@pytest.mark.parametrize("streaming", [False, True], ids=["complete", "stream"])
+def test_deepseek_structured_output_uses_json_mode_and_preserves_schema_instructions(
+    monkeypatch: pytest.MonkeyPatch, streaming: bool
+) -> None:
+    FakeOpenAIClient.response = openai_raw_response()
+    FakeOpenAIClient.stream = openai_raw_stream()
+    FakeOpenAIClient.instances.clear()
+    monkeypatch.setattr(deepseek_provider, "AsyncOpenAI", FakeOpenAIClient)
+    provider = deepseek_provider.OpenAIProvider(
+        model="test-model",
+        api_key=SecretStr("test-key"),
+        base_url=None,
+        timeout_seconds=10.0,
+        max_retries=0,
+        provider_options={},
+        headers={},
+    )
+    request = OpenAIRequest.model_validate(
+        {
+            "messages": [{"role": "system", "content": "Keep it concise."}, {"role": "user", "content": "Hello"}],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "agent_output",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {"text": {"type": "string"}},
+                        "required": ["text"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+        }
+    )
+    original = request.model_dump(mode="json")
+
+    async def run() -> None:
+        if streaming:
+            chunks = [chunk async for chunk in provider.stream(request)]
+            assert chunks[-1].choices[0].finish_reason == "stop"
+        else:
+            assert (await provider.complete(request)).id == "response-1"
+
+    asyncio.run(run())
+
+    sent = FakeOpenAIClient.instances[0].completions.requests
+    assert len(sent) == 1
+    assert sent[0]["response_format"] == {"type": "json_object"}
+    messages = sent[0]["messages"]
+    assert isinstance(messages, list)
+    instruction = messages[0]
+    assert isinstance(instruction, dict) and instruction["role"] == "system"
+    assert "JSON object" in instruction["content"]
+    assert json.loads(instruction["content"].split("\n", 1)[1]) == original["response_format"]["json_schema"]["schema"]
+    assert messages[1:] == [{"role": "system", "content": "Keep it concise."}, {"role": "user", "content": "Hello"}]
+    assert request.model_dump(mode="json") == original
+
+
+@pytest.mark.parametrize("definition", [None, {"name": "output"}])
+def test_deepseek_rejects_a_structured_request_without_its_schema(
+    monkeypatch: pytest.MonkeyPatch, definition: dict[str, str] | None
+) -> None:
+    FakeOpenAIClient.response = openai_raw_response()
+    FakeOpenAIClient.stream = openai_raw_stream()
+    FakeOpenAIClient.instances.clear()
+    monkeypatch.setattr(deepseek_provider, "AsyncOpenAI", FakeOpenAIClient)
+    provider = deepseek_provider.OpenAIProvider(
+        model="test-model",
+        api_key=SecretStr("test-key"),
+        base_url=None,
+        timeout_seconds=10.0,
+        max_retries=0,
+        provider_options={},
+        headers={},
+    )
+    request = OpenAIRequest.model_validate(
+        {
+            "messages": [{"role": "user", "content": "Hello"}],
+            "response_format": {"type": "json_schema", "json_schema": definition},
+        }
+    )
+
+    with pytest.raises(ModelRequestError, match="cannot be converted"):
+        asyncio.run(provider.complete(request))
+
+    assert FakeOpenAIClient.instances[0].completions.requests == []
 
 
 def test_glm_openai_protocol_uses_zhipu_sdk_and_restores_openai_response(

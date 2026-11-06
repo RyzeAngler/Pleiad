@@ -47,6 +47,8 @@ class RecordingExecutor:
         """Return deterministic daemon facts without starting an external process."""
         del stdin, output_limit, timeout_seconds
         self.commands.append(command)
+        if command[1] == "info":
+            return ProcessResult(0, b"", b"", False, 0.01, False)
         if command[1] == "create":
             return ProcessResult(0, b"container-id\n", b"", False, 0.01, False)
         if command[1] == "start":
@@ -608,7 +610,7 @@ def test_command_returns_nonzero_process_facts_and_mounts_only_selected_roots(tm
     assert outcome.output["exit_code"] == 125
     assert outcome.output["stdout"] == "out"
     assert outcome.output["stderr"] == "err"
-    create_command = backend.commands[0]
+    create_command = backend.commands[1]
     assert create_command[1] == "create"
     assert "--workdir" in create_command
     assert create_command[create_command.index("--workdir") + 1] == "/pleiad"

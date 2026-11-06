@@ -2,17 +2,54 @@ import asyncio
 
 import pytest
 from fastmcp import Client, FastMCP
-from fastmcp.client.transports import FastMCPTransport
+from fastmcp.client.transports import ClientTransport, FastMCPTransport
 from fastmcp.exceptions import ToolError
 from mcp_types import CallToolResult, TextContent
 
 from pleiad.contracts import CapabilityGrants
+from pleiad.mcp import stdio as stdio_module
 from pleiad.mcp.contracts import McpServer
 from pleiad.mcp.discovery import discover_tools
 from pleiad.mcp.errors import McpErrorCode, McpToolCallFault
+from pleiad.mcp.stdio import IsolatedStdioTransport
 from pleiad.tools.contracts import ToolCall, ToolContext, ToolResult
 from pleiad.tools.errors import ToolErrorCode
 from pleiad.tools.runtime import ToolRuntime
+
+
+def test_concurrent_stdio_calls_keep_independent_remote_session_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    held = asyncio.Event()
+    release = asyncio.Event()
+
+    def process_transport(command: str, args: list[str], env: dict[str, str], *, keep_alive: bool) -> FastMCPTransport:
+        remote = FastMCP("isolated-process")
+        state = {"count": 0}
+
+        @remote.tool
+        async def inspect(value: str) -> dict[str, str | int]:
+            state["count"] += 1
+            if value == "held":
+                held.set()
+                await release.wait()
+            return {"value": value, "count": state["count"]}
+
+        return FastMCPTransport(remote)
+
+    monkeypatch.setattr(stdio_module, "StdioTransport", process_transport)
+
+    async def scenario() -> None:
+        server = McpServer("local", Client(IsolatedStdioTransport("external-server")))
+        tool = (await discover_tools(server))[0]
+        async with asyncio.timeout(5), asyncio.TaskGroup() as group:
+            first = group.create_task(tool.execute(ToolContext(call_id="held"), {"value": "held"}))
+            await held.wait()
+            second = await tool.execute(ToolContext(call_id="immediate"), {"value": "immediate"})
+            release.set()
+        assert isinstance(second, dict) and second["structured_content"] == {"value": "immediate", "count": 1}
+        outcome = first.result()
+        assert isinstance(outcome, dict) and outcome["structured_content"] == {"value": "held", "count": 1}
+
+    asyncio.run(scenario())
 
 
 def test_host_bound_mcp_permissions_block_side_effects_until_the_current_run_is_granted() -> None:
@@ -46,7 +83,10 @@ def test_host_bound_mcp_permissions_block_side_effects_until_the_current_run_is_
     asyncio.run(scenario())
 
 
-def test_cancelling_a_normal_mcp_request_propagates_and_finishes_remote_cleanup() -> None:
+@pytest.mark.parametrize("stdio", [False, True])
+def test_cancelling_a_normal_mcp_request_propagates_and_finishes_remote_cleanup(
+    stdio: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
     app = FastMCP("cancellation")
     started = asyncio.Event()
     stopped = asyncio.Event()
@@ -60,8 +100,14 @@ def test_cancelling_a_normal_mcp_request_propagates_and_finishes_remote_cleanup(
         finally:
             stopped.set()
 
+    def process_transport(command: str, args: list[str], env: dict[str, str], *, keep_alive: bool) -> FastMCPTransport:
+        return FastMCPTransport(app)
+
+    monkeypatch.setattr(stdio_module, "StdioTransport", process_transport)
+
     async def scenario() -> None:
-        tool = (await discover_tools(McpServer("cancel", Client(FastMCPTransport(app)))))[0]
+        transport: ClientTransport = IsolatedStdioTransport("external-server") if stdio else FastMCPTransport(app)
+        tool = (await discover_tools(McpServer("cancel", Client(transport))))[0]
         task = asyncio.create_task(tool.execute(ToolContext(call_id="cancel"), {}))
         await started.wait()
         task.cancel()

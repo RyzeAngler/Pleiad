@@ -17,7 +17,7 @@ cp .env.example .env
 
 运行测试不需要真实模型密钥。进行真实模型验证时，在本地 `.env` 中填写密钥；`.env` 和运行数据均已被 Git 忽略。
 
-源码目录是 `packages/pleiad/src/` 和 `apps/weave/src/`，通过各自 setuptools `package-dir` 配置映射为 `pleiad` / `pleiad_weave`。不要重新添加同名内层目录，也不要改成 `import src`。App 的 uv 开发源通过本地路径引用 SDK；构建发行物仍声明 `pleiad==0.1.0`。
+源码目录是 `packages/pleiad/src/` 和 `apps/weave/src/`，通过各自 setuptools `package-dir` 配置映射为 `pleiad` / `pleiad_weave`。不要重新添加同名内层目录，也不要改成 `import src`。App 的 uv 开发源通过本地路径引用 SDK；构建发行物声明 `pleiad[mcp]==0.1.2`，发布 App 前需先发布对应 SDK 版本。
 
 新增、删除或移动源码/资源后，在受影响的项目目录重新运行 `uv sync --locked --all-groups --all-extras`。新增非 Python 资源时，同时更新对应成员的 `package-data` 和 `cache-keys`，并验证 wheel/sdist。
 
@@ -25,7 +25,7 @@ SDK 单元测试位于 `packages/pleiad/tests/`；Weave 测试包含应用与跨
 
 ## 架构边界
 
-架构分别由 [Pleiad 架构设计](docs/pleiad-architecture.md) 和 [Weave 架构设计](docs/weave-architecture.md) 说明；发生冲突时遵守仓库根目录的 `AGENTS.md`。`docs/` 只维护这两份当前实现文档，架构图直接嵌入 Mermaid，独立图资源如有需要放在 `docs/assets/`。不保留旧 import/API 别名或双轨实现；修改接口时必须一起迁移调用方、测试和相关文档，不自动迁移或删除用户旧数据。
+架构分别由 [Pleiad 架构设计](docs/pleiad-architecture.md) 和 [Weave 架构设计](docs/weave-architecture.md) 说明；发生冲突时遵守仓库根目录的 `AGENTS.md`。网页启动与操作维护在 [Web 操作文档](docs/weave-web.md)。架构图直接嵌入 Mermaid，独立图资源如有需要放在 `docs/assets/`。不保留旧 import/API 别名或双轨实现；修改接口时必须一起迁移调用方、测试和相关文档，不自动迁移或删除用户旧数据。
 
 代码边界如下：
 
@@ -83,6 +83,12 @@ uv run --directory apps/weave --frozen mypy
 uv run --directory apps/weave --frozen pytest -q -m 'not packaging and not oci and not provider_e2e'
 uv run --project apps/weave --frozen lint-imports --config .importlinter
 uv run --project apps/weave --frozen pre-commit run --all-files
+
+npm --prefix apps/weave/web ci
+npm --prefix apps/weave/web run format:check
+npm --prefix apps/weave/web run typecheck
+npm --prefix apps/weave/web test
+npm --prefix apps/weave/web run build
 ```
 
 pre-commit 默认只检查，不自动格式化或修补文件。除 Ruff、strict mypy、import-linter 和两个 lock 外，还检查 JSON/YAML/TOML、冲突标记、大小写冲突、损坏链接、私钥和大文件；文件检查采用固定版本的 [官方 pre-commit-hooks](https://github.com/pre-commit/pre-commit-hooks/tree/v6.0.0)。

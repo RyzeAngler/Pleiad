@@ -6,9 +6,12 @@ from pathlib import Path
 import pytest
 
 from pleiad.agent.agent import Agent
+from pleiad.context.selection.models import ContextBlock
 from pleiad.contracts import CapabilityGrants, JsonObject, JsonSchema
 from pleiad.events.graph import GraphEvent, GraphEventKind
 from pleiad.events.runtime import RunLimitReachedEvent, RunTimedOutEvent
+from pleiad.memory.short_memory import ShortMemory
+from pleiad.messages.message import UserMessage
 from pleiad.orchestration.budget import BudgetLedger
 from pleiad.orchestration.errors import OrchestrationStateError
 from pleiad.orchestration.graph.edge import Edge, EdgeCondition, EdgeMapping
@@ -38,6 +41,37 @@ from tests.runtime.execution.test_runner import (
 async def wait_for_event(event: asyncio.Event) -> None:
     """Wait for a test barrier without masking scheduler deadlocks."""
     await asyncio.wait_for(event.wait(), timeout=1)
+
+
+def test_agent_node_references_reach_model_without_changing_input_contract_or_stored_turn(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        model = FakeOpenAIModel((text_batch("done", "final"),))
+        runner, agent = make_runner(model, tmp_path)
+        memory = ShortMemory.in_memory("node-context")
+        node = Node(
+            "contextual",
+            agent=agent,
+            runner=runner,
+            input_schema={"type": "object", "additionalProperties": False},
+            memory_factory=lambda node_run_id: memory,
+            context_blocks=(ContextBlock(kind="reference", origin="test.host", content="Reference facts"),),
+        )
+        result = await GraphExecutor().execute(Graph(graph_id="contextual-node", nodes=(node,)), {})
+        assert result.status is GraphStatus.SUCCEEDED
+        user = next(message for message in model.requests[0].messages if message.role == "user")
+        assert isinstance(user.content, list)
+        block = user.content[0]
+        assert isinstance(block, dict) and isinstance(block["text"], str)
+        assert "Reference facts" in block["text"]
+        assert "<request>\n{}\n</request>" in block["text"]
+        system = next(message for message in model.requests[0].messages if message.role == "system")
+        assert "Reference facts" not in str(system.content)
+        turns = await memory.read()
+        assert [message.content for turn in turns for message in turn.messages if isinstance(message, UserMessage)] == [
+            "{}"
+        ]
+
+    asyncio.run(scenario())
 
 
 def test_agent_node_budget_limit_is_a_known_failure_with_its_run_identity_and_usage(tmp_path: Path) -> None:
@@ -561,6 +595,98 @@ def test_graph_notification_failure_does_not_replace_business_result() -> None:
     result = asyncio.run(GraphExecutor().execute(graph, {}, event_sink=fail_notification))
 
     assert result.status is GraphStatus.SUCCEEDED
+
+
+@pytest.mark.parametrize("invalid_output", [False, True])
+def test_graph_delivers_node_start_before_running_a_node_with_a_blocked_event_sink(invalid_output: bool) -> None:
+    """A delayed start notification cannot arrive after the Node's result."""
+
+    async def scenario() -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        timeline: list[str] = []
+
+        async def node(input_value: JsonObject) -> JsonObject:
+            timeline.append("node.result")
+            return input_value
+
+        async def collect(event: object) -> None:
+            assert isinstance(event, GraphEvent)
+            if event.kind is GraphEventKind.NODE_STARTED:
+                started.set()
+                await release.wait()
+            timeline.append(event.kind.value)
+
+        graph = Graph(
+            graph_id="ordered-node-start",
+            nodes=(
+                Node(
+                    "node",
+                    handler=node,
+                    output_schema={"type": "object", "required": ["value"]} if invalid_output else {},
+                ),
+            ),
+        )
+        task = asyncio.create_task(GraphExecutor().execute(graph, {}, event_sink=collect))
+        try:
+            await wait_for_event(started)
+            assert timeline == ["graph.started"]
+        finally:
+            release.set()
+            result = await asyncio.wait_for(task, 1)
+        assert result.status is (GraphStatus.FAILED if invalid_output else GraphStatus.SUCCEEDED)
+        assert timeline == [
+            "graph.started",
+            "graph.node.started",
+            "node.result",
+            "graph.node.completed",
+            "graph.failed" if invalid_output else "graph.completed",
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_cancelling_a_node_start_notification_refunds_its_unused_parent_budget(tmp_path: Path) -> None:
+    """Cancellation before task creation cannot spend or retain child allowance."""
+
+    async def scenario() -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        model = FakeOpenAIModel((text_batch("unused", "unused"),))
+        runner, agent = make_runner(model, tmp_path)
+        graph = Graph(graph_id="cancel-before-node", nodes=(Node("node", agent=agent, runner=runner),))
+        executor = GraphExecutor()
+        context = ToolContext(
+            call_id="graph",
+            run_id="parent",
+            parent_limits=ParentRunLimits(
+                deadline=datetime.now(UTC) + timedelta(minutes=1),
+                remaining_turns=2,
+                remaining_output_tokens=8,
+                tool_concurrency=1,
+            ),
+        )
+
+        async def collect(event: object) -> None:
+            assert isinstance(event, GraphEvent)
+            if event.kind is GraphEventKind.NODE_STARTED:
+                started.set()
+                await release.wait()
+
+        task = asyncio.create_task(executor.execute(graph, {}, event_sink=collect, context=context))
+        try:
+            await wait_for_event(started)
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        saved = executor.budget_state("parent")
+        assert saved is not None
+        assert saved.remaining_turns == 2
+        assert saved.remaining_output_tokens == 8
+        assert model.requests == []
+
+    asyncio.run(scenario())
 
 
 def test_graph_rejects_mapping_conflict_before_running_any_node() -> None:

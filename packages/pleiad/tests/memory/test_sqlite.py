@@ -4,9 +4,14 @@ from pathlib import Path
 
 import pytest
 
-from pleiad.memory.errors import MemoryDataCorruptedError, MemoryTurnConflictError, MemoryTurnInvalidError
+from pleiad.memory.errors import (
+    MemoryDataCorruptedError,
+    MemoryStorageError,
+    MemoryTurnConflictError,
+    MemoryTurnInvalidError,
+)
 from pleiad.memory.short_memory import ShortMemory
-from pleiad.messages.message import AssistantMessage, ToolCall, UserMessage
+from pleiad.messages.message import AssistantMessage, ToolCall, ToolMessage, UserMessage
 
 
 def test_sqlite_reopens_with_the_same_completed_turn_order(tmp_path: Path) -> None:
@@ -102,3 +107,78 @@ def test_sqlite_serializes_concurrent_begin_operations(tmp_path: Path) -> None:
         return await asyncio.gather(begin(first), begin(second))
 
     assert sorted(asyncio.run(scenario())) == ["conflict", "created"]
+
+
+def test_sqlite_clear_removes_history_and_tool_results_across_reopened_handles(tmp_path: Path) -> None:
+    """Deleted history stays absent after reopening without affecting another scope."""
+    database = tmp_path / "memory.db"
+
+    async def scenario() -> None:
+        memory = ShortMemory.sqlite("chat", database)
+        other = ShortMemory.sqlite("other-chat", database)
+        question = UserMessage(message_id="user-1", content="question")
+        assistant = AssistantMessage(
+            message_id="assistant-1",
+            tool_calls=(ToolCall(id="call-1", name="lookup", arguments="{}"),),
+        )
+        result = ToolMessage(message_id="result-1", tool_call_id="call-1", content="large result " * 10000)
+        other_turn = await other.begin("agent", (question,))
+        other_completed = await other.complete(other_turn.turn_id, (assistant, result))
+        await memory.clear()
+        turn = await memory.begin("agent", (question,))
+        await memory.complete(turn.turn_id, (assistant, result))
+        await memory.begin("agent")
+        assert await memory.read_tool_result(result.message_id) == result
+
+        await memory.clear()
+        await memory.clear()
+
+        restored = ShortMemory.sqlite("chat", database)
+        assert await restored.read() == ()
+        assert await restored.active() is None
+        assert await restored.read_tool_result(result.message_id) is None
+        assert await other.read() == (other_completed,)
+        assert await other.read_tool_result(result.message_id) == result
+        replacement = await restored.begin("agent", (question,))
+        assert replacement.sequence == 1
+        completed = await restored.complete(replacement.turn_id, (assistant, result))
+        assert await memory.read() == (completed,)
+
+    asyncio.run(scenario())
+
+
+def test_sqlite_clear_failure_preserves_all_history_and_tool_results(tmp_path: Path) -> None:
+    """A database failure after deleting messages rolls back the whole clear."""
+    database = tmp_path / "memory.db"
+
+    async def scenario() -> None:
+        memory = ShortMemory.sqlite("chat", database)
+        turn = await memory.begin("agent", (UserMessage(message_id="user-1", content="question"),))
+        result = ToolMessage(message_id="result-1", tool_call_id="call-1", content="tool output")
+        completed = await memory.complete(
+            turn.turn_id,
+            (
+                AssistantMessage(
+                    message_id="assistant-1",
+                    tool_calls=(ToolCall(id="call-1", name="lookup", arguments="{}"),),
+                ),
+                result,
+            ),
+        )
+        active = await memory.begin("agent")
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                "CREATE TRIGGER fail_clear BEFORE DELETE ON turns "
+                "BEGIN SELECT RAISE(ABORT, 'injected delete failure'); END",
+            )
+
+        with pytest.raises(MemoryStorageError, match="SQLite clear failed") as failure:
+            await memory.clear()
+
+        assert isinstance(failure.value.__cause__, sqlite3.IntegrityError)
+        restored = ShortMemory.sqlite("chat", database)
+        assert await restored.read() == (completed,)
+        assert await restored.active() == active
+        assert await restored.read_tool_result(result.message_id) == result
+
+    asyncio.run(scenario())

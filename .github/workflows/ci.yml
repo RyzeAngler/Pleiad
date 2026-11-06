@@ -19,6 +19,19 @@ jobs:
           version: "0.11.22"
       - name: Install Python
         run: uv python install 3.12
+      - uses: actions/setup-node@v4
+        if: matrix.project == 'apps/weave'
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: apps/weave/web/package-lock.json
+      - name: Build and test Web
+        if: matrix.project == 'apps/weave'
+        run: |
+          npm --prefix apps/weave/web ci
+          npm --prefix apps/weave/web run format:check
+          npm --prefix apps/weave/web test
+          npm --prefix apps/weave/web run build
       - name: Sync this project
         run: uv sync --project "${{ matrix.project }}" --locked --all-groups --all-extras --python 3.12
       - name: Check formatting
@@ -47,5 +60,14 @@ jobs:
         run: uv python install 3.12
       - name: Sync App test environment
         run: uv sync --project apps/weave --locked --all-groups --all-extras --python 3.12
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: apps/weave/web/package-lock.json
+      - name: Build packaged Web resources
+        run: |
+          npm --prefix apps/weave/web ci
+          npm --prefix apps/weave/web run build
       - name: Fresh build and clean-install smoke
         run: uv run --directory apps/weave --frozen pytest -q -m packaging tests/packaging

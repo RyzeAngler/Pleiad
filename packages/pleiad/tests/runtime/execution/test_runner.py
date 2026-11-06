@@ -164,6 +164,8 @@ class SuccessfulExecutor:
     ) -> ProcessResult:
         """Return successful create, start, inspect, and remove facts."""
         del stdin, output_limit, timeout_seconds
+        if command[1] == "info":
+            return ProcessResult(0, b"", b"", False, 0.01, False)
         if command[1] == "create":
             return ProcessResult(0, b"container-id\n", b"", False, 0.01, False)
         if command[1] == "start":
@@ -897,9 +899,10 @@ def test_skill_requires_read_access_before_model_call(tmp_path: Path) -> None:
     assert model.requests == []
 
 
-def test_invalid_final_output_is_not_success(tmp_path: Path) -> None:
+@pytest.mark.parametrize("content", ["not json", '{"answer": 7}'], ids=["malformed-json", "schema-mismatch"])
+def test_invalid_final_output_is_not_success(tmp_path: Path, content: str) -> None:
     """A final response that violates the Agent schema returns a failed Run."""
-    model = FakeOpenAIModel((text_batch("not json", "response-1"),))
+    model = FakeOpenAIModel((text_batch(content, "response-1"),))
     runner, _ = make_runner(model, tmp_path)
     agent = Agent(
         name="structured",

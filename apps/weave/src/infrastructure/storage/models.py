@@ -6,7 +6,7 @@ from typing import Literal
 
 from pleiad.contracts import ContractModel, JsonObject
 from pleiad.orchestration.budget import BudgetState
-from pleiad.orchestration.graph.state import GraphStatus, NodeStatus
+from pleiad.orchestration.graph.state import GraphState, GraphStatus, NodeStatus
 from pleiad.runtime.lifecycle.state import RunState, RunStatus, RunUsage
 from pydantic import Field, model_validator
 
@@ -105,13 +105,18 @@ class ArtifactRef(ContractModel):
 
 
 class GraphRunRecord(ContractModel):
-    """Durable runtime state for one Graph revision execution."""
+    """Durable outcome and SDK scheduling state of one Graph invocation.
+
+    State remains absent until the SDK returns a checkpoint. Historical records
+    and interrupted invocations may have no checkpoint; absence is not pending.
+    """
 
     graph_run_id: str = Field(min_length=1)
     execution_id: str = Field(min_length=1)
     graph_id: str = Field(min_length=1)
     graph_revision: int = Field(ge=1)
     status: GraphStatus
+    state: GraphState | None = None
     outputs: JsonObject = Field(default_factory=dict)
     error: ErrorRecord | None = None
     started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
@@ -119,13 +124,20 @@ class GraphRunRecord(ContractModel):
 
 
 class NodeRunRecord(ContractModel):
-    """Durable attempt state for one Graph node."""
+    """Durable attempt belonging to one exact Graph invocation.
+
+    Historical records without a Graph invocation identity remain unassociated;
+    callers must not infer their ownership from a shared definition revision.
+    """
 
     node_run_id: str = Field(min_length=1)
+    graph_run_id: str | None = Field(default=None, min_length=1)
     execution_id: str = Field(min_length=1)
     graph_id: str = Field(min_length=1)
     graph_revision: int = Field(ge=1)
     node_id: str = Field(min_length=1)
+    input: JsonObject | None = None
+    model_name: str | None = Field(default=None, min_length=1)
     sdk_run_id: str | None = Field(default=None, min_length=1)
     sdk_run_status: RunStatus | None = None
     usage: RunUsage | None = None

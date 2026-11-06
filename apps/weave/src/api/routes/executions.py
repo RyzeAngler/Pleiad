@@ -25,7 +25,10 @@ async def submit(
     service: ExecutionService = service_dependency,
 ) -> ExecutionResponse:
     """Queue one objective and return its durable identity immediately."""
-    return ExecutionResponse(execution=await service.submit(request))
+    try:
+        return ExecutionResponse(execution=await service.submit(request))
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
 
 
 @router.post("/{execution_id}/cancel", response_model=ExecutionResponse)

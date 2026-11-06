@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from uuid import uuid4
 
 from pleiad.agent.agent import Agent
+from pleiad.context.selection.models import ContextBlock
 from pleiad.contracts import JsonObject, JsonSchema
 from pleiad.errors.base import ErrorType
 from pleiad.memory.short_memory import ShortMemory
@@ -40,6 +41,7 @@ class Node:
     side_effect: bool = False
     parent_run_id: str | None = None
     parent_policy: EffectivePolicy | None = None
+    context_blocks: tuple[ContextBlock, ...] = ()
 
     def __post_init__(self) -> None:
         """Validate one node's executable binding and schemas."""
@@ -70,6 +72,7 @@ class Node:
             handoffs=self.handoffs,
             parent_run_id=self.parent_run_id,
             parent_policy=self.parent_policy,
+            context_blocks=self.context_blocks,
         )
         if result.status is RunStatus.SUCCEEDED:
             output = result.structured_output or {"text": result.final_output}

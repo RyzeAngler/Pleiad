@@ -103,3 +103,32 @@ def test_in_memory_abort_releases_the_uncommitted_turn_sequence() -> None:
         return replacement.sequence, tuple(item.sequence for item in await memory.read())
 
     assert asyncio.run(scenario()) == (1, ())
+
+
+def test_in_memory_clear_discards_all_turns_and_reuses_the_stream() -> None:
+    """Clearing removes completed and abandoned active Turns only in this scope."""
+
+    async def scenario() -> None:
+        memory = ShortMemory.in_memory("chat")
+        other = ShortMemory.in_memory("other-chat")
+        question = UserMessage(message_id="user-1", content="question")
+        answer = AssistantMessage(message_id="assistant-1", content="answer")
+        other_turn = await other.begin("agent", (question,))
+        other_completed = await other.complete(other_turn.turn_id, (answer,))
+        await memory.clear()
+        turn = await memory.begin("agent", (question,))
+        await memory.complete(turn.turn_id, (answer,))
+        await memory.begin("agent")
+
+        await memory.clear()
+        await memory.clear()
+
+        assert await memory.read() == ()
+        assert await memory.active() is None
+        assert await other.read() == (other_completed,)
+        replacement = await memory.begin("agent", (question,))
+        assert replacement.sequence == 1
+        completed = await memory.complete(replacement.turn_id, (answer,))
+        assert await memory.read() == (completed,)
+
+    asyncio.run(scenario())

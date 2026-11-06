@@ -72,6 +72,27 @@ class TaskGraphStore:
         with self.lock:
             return max(self.graphs.values(), key=lambda item: item.created_at, default=None)
 
+    def delete_revision(self, graph_id: str, revision: int) -> None:
+        """Remove an unreferenced revision from disk and the live Graph indexes."""
+        with self.lock:
+            if self.root is not None:
+                path = self.root / sha256(graph_id.encode("utf-8")).hexdigest() / f"revision-{revision}.json"
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError as error:
+                    raise SystemFault(
+                        "weave.system_storage", str({"path": str(path), "exception": type(error).__name__})
+                    ) from error
+            history = self.history.get(graph_id)
+            if history is None:
+                return
+            history.pop(revision, None)
+            if history:
+                self.graphs[graph_id] = history[max(history)]
+            else:
+                self.history.pop(graph_id, None)
+                self.graphs.pop(graph_id, None)
+
     def load(self) -> None:
         """Load all durable graph revisions into the in-process indexes."""
         root = self.root

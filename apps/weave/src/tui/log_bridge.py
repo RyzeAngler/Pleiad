@@ -3,12 +3,9 @@ import re
 from collections.abc import Callable
 from datetime import datetime
 
+from pleiad_weave.infrastructure.logging import redact_log_credentials
 from pleiad_weave.tui.state import LogRecordView
 
-SENSITIVE_VALUE_PATTERN = re.compile(
-    r"(?i)\b(api[_-]?key|authorization|password|secret|token)\b\s*[:=]\s*(?:bearer\s+)?([^\s,;]+)"
-)
-BEARER_PATTERN = re.compile(r"(?i)\bbearer\s+[^\s,;]+")
 MAX_LOG_MESSAGE_CHARS = 280
 
 
@@ -98,9 +95,7 @@ def summarize_log_message(message: str) -> str:
 
 def safe_log_message(message: str) -> str:
     """Redact obvious credential assignments and bound the visible line length."""
-    redacted = BEARER_PATTERN.sub("Bearer [REDACTED]", message)
-    redacted = SENSITIVE_VALUE_PATTERN.sub(r"\1=[REDACTED]", redacted)
-    compact = " ".join(redacted.split())
+    compact = " ".join(redact_log_credentials(message).split())
     if len(compact) <= MAX_LOG_MESSAGE_CHARS:
         return compact
     return compact[: MAX_LOG_MESSAGE_CHARS - 1] + "…"

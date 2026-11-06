@@ -293,9 +293,13 @@ class GraphExecutor:
                     states[node_id] = states[node_id].model_copy(
                         update={"status": NodeStatus.RUNNING, "attempt": states[node_id].attempt + 1}
                     )
+                    try:
+                        await self.emit(event_sink, graph, GraphEventKind.NODE_STARTED, node_id, None)
+                    except asyncio.CancelledError:
+                        self.budgets.settle(reservation_id, RunUsage())
+                        raise
                     task = tasks.create_task(self.run_node(scoped, input_value, node_executor, reservation_id, usage))
                     running[task] = (node_id, reservation_id)
-                    await self.emit(event_sink, graph, GraphEventKind.NODE_STARTED, node_id, None)
                     progress = True
             if not running:
                 if progress:

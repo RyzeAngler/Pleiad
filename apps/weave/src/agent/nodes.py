@@ -25,9 +25,12 @@ class NodeExecutor:
         records: NodeRunRepository,
         artifacts: ArtifactStore,
         publisher: ExecutionEventPublisher,
+        *,
+        graph_run_id: str,
     ) -> None:
         """Bind product identity without replacing SDK Agent execution."""
         self.execution_id = execution_id
+        self.graph_run_id = graph_run_id
         self.graph_id = graph_id
         self.revision = revision
         self.records = records
@@ -38,10 +41,13 @@ class NodeExecutor:
         """Save the attempt lifecycle and delegate all execution to Node.run."""
         record = NodeRunRecord(
             node_run_id=uuid4().hex,
+            graph_run_id=self.graph_run_id,
             execution_id=self.execution_id,
             graph_id=self.graph_id,
             graph_revision=self.revision,
             node_id=node.node_id,
+            input=input_value,
+            model_name=None if node.agent is None else node.agent.model.model,
             status=NodeStatus.RUNNING,
         )
         await asyncio.to_thread(self.records.save, record)
@@ -104,6 +110,7 @@ class NodeExecutor:
             {
                 "node_id": node.node_id,
                 "node_run_id": record.node_run_id,
+                "graph_run_id": record.graph_run_id,
                 "sdk_run_id": result.node_run_id if node.agent is not None else None,
                 "sdk_run_status": None if result.run_status is None else result.run_status.value,
                 "usage": None if result.usage is None else result.usage.model_dump(mode="json"),

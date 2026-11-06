@@ -1,0 +1,84 @@
+{
+  "servers": [
+    {
+      "code": "websearch",
+      "enabled": false,
+      "command": "node",
+      "args": ["apps/weave/mcp/node_modules/open-websearch/build/index.js"],
+      "env": {
+        "MODE": "stdio",
+        "SEARCH_MODE": "request",
+        "DEFAULT_SEARCH_ENGINE": "bing"
+      },
+      "allowed_tools": ["search", "fetchWebContent", "fetchGithubReadme", "fetchCsdnArticle", "fetchJuejinArticle", "fetchLinuxDoArticle"]
+    },
+    {
+      "code": "amap",
+      "enabled": false,
+      "url_env": "AMAP_MCP_URL"
+    },
+    {
+      "code": "baidu_maps",
+      "enabled": false,
+      "url_env": "BAIDU_MAPS_MCP_URL"
+    },
+    {
+      "code": "xiaohongshu",
+      "enabled": false,
+      "url": "http://127.0.0.1:18060/mcp",
+      "allowed_tools": ["check_login_status", "get_login_qrcode", "search_feeds", "get_feed_detail", "list_feeds", "user_profile"],
+      "timeout_seconds": 120
+    },
+    {
+      "code": "tuniu_hotel",
+      "enabled": false,
+      "url": "https://openapi.tuniu.cn/mcp/hotel",
+      "header_env": {"apiKey": "TUNIU_API_KEY"},
+      "allowed_tools": ["tuniu_hotel_search", "tuniu_hotel_detail"]
+    },
+    {
+      "code": "tuniu_ticket",
+      "enabled": false,
+      "url": "https://openapi.tuniu.cn/mcp/ticket",
+      "header_env": {"apiKey": "TUNIU_API_KEY"},
+      "allowed_tools": ["query_cheapest_tickets"]
+    },
+    {
+      "code": "firecrawl",
+      "enabled": false,
+      "url": "https://mcp.firecrawl.dev/v2/mcp",
+      "auth": "bearer",
+      "token_env": "FIRECRAWL_API_KEY"
+    },
+    {
+      "code": "context7",
+      "enabled": false,
+      "url": "https://mcp.context7.com/mcp",
+      "auth": "bearer",
+      "token_env": "CONTEXT7_API_KEY"
+    },
+    {
+      "code": "github",
+      "enabled": false,
+      "url": "https://api.githubcopilot.com/mcp/",
+      "auth": "bearer",
+      "token_env": "GITHUB_TOKEN",
+      "headers": {
+        "X-MCP-Toolsets": "repos,issues,pull_requests",
+        "X-MCP-Readonly": "true"
+      }
+    },
+    {
+      "code": "activepieces",
+      "enabled": false,
+      "url_env": "ACTIVEPIECES_MCP_URL",
+      "auth": "oauth"
+    },
+    {
+      "code": "playwright",
+      "enabled": false,
+      "url": "http://127.0.0.1:8931/mcp",
+      "allowed_tools": ["browser_navigate", "browser_navigate_back", "browser_snapshot", "browser_click", "browser_type", "browser_fill_form", "browser_press_key", "browser_select_option", "browser_hover", "browser_drag", "browser_tabs", "browser_wait_for", "browser_handle_dialog", "browser_take_screenshot", "browser_resize", "browser_console_messages", "browser_network_requests"]
+    }
+  ]
+}

@@ -11,26 +11,28 @@ requires-python = ">=3.12,<3.13"
 license = "MIT"
 license-files = ["LICENSE"]
 dependencies = [
-    "pleiad==0.1.1",
+    "pleiad[mcp]==0.1.2",
     "opentelemetry-api>=1.44.0,<2.0.0",
     "fastapi>=0.116.0,<1.0.0",
     "httpx[socks]>=0.28.1,<1.0.0",
     "pydantic-settings>=2.10.0,<3.0.0",
+    "python-dotenv>=1.1.0,<2.0.0",
+    "py-key-value-aio>=0.4.6,<1.0.0",
     "textual>=0.60.0,<1.0.0",
     "typer>=0.16.0,<1.0.0",
     "uvicorn[standard]>=0.35.0,<1.0.0",
 ]
 
 [project.optional-dependencies]
-openai = ["pleiad[openai]==0.1.1"]
-anthropic = ["pleiad[anthropic]==0.1.1"]
-glm = ["pleiad[glm]==0.1.1"]
-qwen = ["pleiad[qwen]==0.1.1"]
-kimi = ["pleiad[kimi]==0.1.1"]
-deepseek = ["pleiad[deepseek]==0.1.1"]
-minimax = ["pleiad[minimax]==0.1.1"]
-observability = ["pleiad[observability]==0.1.1"]
-models = ["pleiad[models]==0.1.1"]
+openai = ["pleiad[openai]==0.1.2"]
+anthropic = ["pleiad[anthropic]==0.1.2"]
+glm = ["pleiad[glm]==0.1.2"]
+qwen = ["pleiad[qwen]==0.1.2"]
+kimi = ["pleiad[kimi]==0.1.2"]
+deepseek = ["pleiad[deepseek]==0.1.2"]
+minimax = ["pleiad[minimax]==0.1.2"]
+observability = ["pleiad[observability]==0.1.2"]
+models = ["pleiad[models]==0.1.2"]
 
 [project.scripts]
 pleiad = "pleiad_weave.cli:app"
@@ -65,6 +67,7 @@ pleiad_weave = ["py.typed"]
     "sandbox/images/python/requirements.lock",
 ]
 "pleiad_weave.tui" = ["README.md", "styles/*.tcss"]
+"pleiad_weave.web" = ["assets/index.html", "assets/assets/*"]
 
 [tool.ruff]
 line-length = 120
@@ -126,6 +129,7 @@ cache-keys = [
     { file = "src/py.typed" },
     { file = "src/**/*.md" },
     { file = "src/**/*.tcss" },
+    { file = "src/web/assets/**/*" },
     { file = "src/resources/sandbox/images/python/Dockerfile" },
     { file = "src/resources/sandbox/images/python/requirements.lock" },
 ]

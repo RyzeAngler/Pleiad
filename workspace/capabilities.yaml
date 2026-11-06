@@ -2,6 +2,9 @@ tools:
   - name: text_statistics
     code: example.tool.text_statistics
     description: 统计工作区文本文件的行数、非空行数、词数和字符数
+  - name: csv_profile
+    code: data.tool.csv_profile
+    description: 分析工作区 CSV 的行数、各列空值和有限样例，并对显式指定的列计算数值摘要
 skills:
   - name: task-analysis
     code: task-analysis
@@ -12,3 +15,18 @@ skills:
   - name: tool-development
     code: tool-development
     description: 开发、设计、实现、校验并发布工作区中的自定义 Tool
+  - name: systematic-debugging
+    code: systematic-debugging
+    description: 对工具失败或任务异常进行根因分析，通过证据和单一假设定位问题后再修复
+  - name: verification-before-completion
+    code: verification-before-completion
+    description: 在声明任务完成前执行对应验收检查，明确区分已验证结果、失败与尚未验证的部分
+  - name: travel-planning
+    code: travel-planning
+    description: 制定旅行行程，结合攻略、地图路线与酒店门票查询核实时间、总价和预订条件
+  - name: web-research
+    code: web-research
+    description: 通过网络搜索、网页读取和动态页面核查完成有日期、来源引用与交叉验证的研究
+  - name: document-writing
+    code: document-writing
+    description: 根据已有资料或检索证据撰写并保存 Markdown 报告，核对来源、假设和文件写入结果

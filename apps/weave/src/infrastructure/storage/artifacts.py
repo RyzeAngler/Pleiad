@@ -51,3 +51,15 @@ class ArtifactStore:
             raise SystemFault(
                 "weave.system_storage", str({"artifact_id": reference.artifact_id, "exception": exc.__class__.__name__})
             ) from exc
+
+    def delete(self, artifact_id: str) -> None:
+        """Remove an owned artifact using its identity, never its stored location."""
+        path = self.root / f"{artifact_id}.json"
+        if path.parent != self.root:
+            raise ValueError("Artifact identity must not contain path components")
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as error:
+            raise SystemFault(
+                "weave.system_storage", str({"artifact_id": artifact_id, "exception": type(error).__name__})
+            ) from error

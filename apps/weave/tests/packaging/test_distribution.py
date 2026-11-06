@@ -4,9 +4,12 @@ import subprocess
 import sys
 import tarfile
 import zipfile
+from email.parser import Parser
 from pathlib import Path
 
 import pytest
+from packaging.requirements import Requirement
+from packaging.version import Version
 
 pytestmark = pytest.mark.packaging
 
@@ -44,12 +47,26 @@ def test_distributions_install_without_the_checkout_and_ship_only_product_resour
         assert "pleiad/tools/builtins/read_tool_result.py" not in names
     with zipfile.ZipFile(app) as archive:
         names = archive.namelist()
+        metadata_path = next(name for name in names if name.endswith(".dist-info/METADATA"))
+        metadata = Parser().parsestr(archive.read(metadata_path).decode("utf-8"))
+        sdk_requirements = [
+            requirement
+            for value in metadata.get_all("Requires-Dist", [])
+            if (requirement := Requirement(value)).name == "pleiad"
+        ]
+        assert sdk_requirements
+        for requirement in sdk_requirements:
+            assert Version("0.1.2") in requirement.specifier
+            assert Version("0.1.1") not in requirement.specifier
         assert "pleiad_weave/agent/graph.py" in names
         assert "pleiad_weave/capabilities/approval.py" in names
         assert "pleiad_weave/memory_cli.py" in names
         assert "pleiad_weave/evaluation.py" in names
         assert "pleiad_weave/tui/screens/approvals.py" in names
         assert "pleiad_weave/tui/styles/theme.tcss" in names
+        assert "pleiad_weave/web/assets/index.html" in names
+        assert any(name.startswith("pleiad_weave/web/assets/assets/") and name.endswith(".js") for name in names)
+        assert any(name.startswith("pleiad_weave/web/assets/assets/") and name.endswith(".css") for name in names)
         assert "pleiad_weave/resources/sandbox/images/python/Dockerfile" in names
         assert "pleiad_weave/application/supervisor.py" not in names
         assert "pleiad_weave/infrastructure/storage/traces.py" not in names
@@ -81,6 +98,7 @@ def test_distributions_install_without_the_checkout_and_ship_only_product_resour
     script = """
 import importlib.util
 import asyncio
+import re
 from importlib.resources import files
 from pathlib import Path
 from pleiad.agent.agent import Agent
@@ -103,6 +121,40 @@ with bundled_python_image_definition() as (dockerfile, lockfile):
     assert "USER 65532:65532" in dockerfile.read_text()
     assert "standard library by default" in lockfile.read_text()
 assert files("pleiad_weave.tui").joinpath("styles/theme.tcss").read_text()
+web = files("pleiad_weave.web").joinpath("assets")
+index = web.joinpath("index.html").read_text()
+assets = re.findall(r'(?:src|href)="(/assets/[^\"]+)"', index)
+assert assets
+font_faces = []
+for asset in assets:
+    resource = web.joinpath(asset.removeprefix("/"))
+    assert resource.read_bytes()
+    if asset.endswith(".css"):
+        font_faces.extend(re.findall(r"@font-face[ ]*[{]([^}]+)[}]", resource.read_text()))
+assert font_faces and any("MiSans" in face for face in font_faces)
+font_assets = set()
+for face in font_faces:
+    sources = re.findall(r"url[(]([^)]*)[)]", face)
+    assert sources
+    for source in sources:
+        asset = source.strip("\\\"'")
+        assert asset.startswith("/assets/") and asset.endswith(".woff2"), asset
+        font_assets.add(asset)
+for asset in font_assets:
+    assert web.joinpath(asset.removeprefix("/")).read_bytes().startswith(b"wOF2")
+license_assets = []
+for link in re.findall(r"<link[^>]+>", index):
+    if 'rel="license"' in link:
+        target = re.search(r'href="([^\"]+)"', link)
+        assert target is not None
+        license_assets.append(target[1])
+assert len(license_assets) == 2
+font_licenses = [asset for asset in license_assets if asset.endswith(".pdf")]
+font_notices = [asset for asset in license_assets if asset.endswith(".txt")]
+assert len(font_licenses) == len(font_notices) == 1
+assert web.joinpath(font_licenses[0].removeprefix("/")).read_bytes().startswith(b"%PDF-")
+notice = web.joinpath(font_notices[0].removeprefix("/")).read_text()
+assert "MiSans" in notice and "Xiaomi" in notice
 case = EvaluationCase(case_id="smoke", objective="task", files={"input": "value"}, expected={"n": 1})
 assert score_output(case, '{"n":1}')
 async def read_result() -> None:
@@ -119,6 +171,11 @@ async def read_result() -> None:
     )
     assert isinstance(result, ToolResult) and result.ok and result.output is not None
     assert result.output["content"] == "original evidence"
+    await memory.clear()
+    assert await memory.read() == ()
+    assert await memory.active() is None
+    restarted = await memory.begin("agent", (UserMessage(content="new task"),))
+    assert restarted.sequence == 1
 asyncio.run(read_result())
 print("clean install verified")
 """

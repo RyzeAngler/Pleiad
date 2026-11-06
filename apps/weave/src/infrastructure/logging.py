@@ -10,6 +10,14 @@ CREDENTIAL_PATTERN = re.compile(
     r"(?i)\b(api[_-]?key|authorization|password|secret|token)\b\s*[:=]\s*(?:bearer\s+)?[^\s,;]+"
 )
 BEARER_PATTERN = re.compile(r"(?i)\bbearer\s+[^\s,;]+")
+QUERY_CREDENTIAL_PATTERN = re.compile(r"(?i)([?&](?:key|ak)=)[^&#\s\"'<>]*")
+
+
+def redact_log_credentials(message: str) -> str:
+    """Remove credential values while preserving URL query diagnostics."""
+    redacted = QUERY_CREDENTIAL_PATTERN.sub(lambda match: f"{match.group(1)}[REDACTED]", message)
+    redacted = CREDENTIAL_PATTERN.sub(lambda match: f"{match.group(1)}=[REDACTED]", redacted)
+    return BEARER_PATTERN.sub("Bearer [REDACTED]", redacted)
 
 
 class SafeLogFormatter(logging.Formatter):
@@ -17,9 +25,7 @@ class SafeLogFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         """Sanitize the complete rendered log entry, including exception text."""
-        rendered = super().format(record)
-        rendered = CREDENTIAL_PATTERN.sub(lambda match: f"{match.group(1)}=[REDACTED]", rendered)
-        return BEARER_PATTERN.sub("Bearer [REDACTED]", rendered)
+        return redact_log_credentials(super().format(record))
 
 
 MANAGED_HANDLERS: list[tuple[logging.Logger, logging.Handler, int, bool]] = []

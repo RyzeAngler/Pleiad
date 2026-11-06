@@ -1,0 +1,21 @@
+{
+  "name": "weave-mcp-services",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Pinned host-side MCP services for Weave deployments",
+  "scripts": {
+    "browser": "playwright-mcp --host 127.0.0.1 --port 8931 --allowed-hosts 127.0.0.1:8931,localhost:8931 --headless --isolated --shared-browser-context --output-dir ../../../.pleiad-workspace/browser"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@playwright/mcp": "0.0.68",
+    "open-websearch": "2.2.0"
+  },
+  "overrides": {
+    "open-websearch": {
+      "zod": "4.6.6"
+    }
+  }
+}

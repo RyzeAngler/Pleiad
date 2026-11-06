@@ -1,5 +1,33 @@
 # Pleiad Weave
 
+Default workspace MCP presets and reviewed Skills are described in the
+[capability setup guide](../../docs/weave-capabilities.md). Remote connections
+use the public Pleiad MCP API and remain disabled until configured. Authorize
+OAuth connections with `pleiad mcp-login <server-code>` in a terminal.
+
+## Web workspace
+
+The same `pleiad serve` process now serves the Web UI at `http://127.0.0.1:8000/`
+and its API. From the repository root, build the frontend once before starting
+from a source checkout:
+
+```bash
+npm --prefix apps/weave/web ci
+npm --prefix apps/weave/web run build
+uv run --project apps/weave --frozen pleiad serve
+```
+
+The UI uses real spaces, conversation history, graph definitions, node attempts,
+artifacts, SSE progress, and persisted approval requests. Space rules and
+resource preferences are saved on the server and snapshotted per Execution.
+Preferences are guidance, not an authorization boundary. Models and capability
+installation continue to use the existing host/workspace configuration.
+
+Frontend sources live in `web/`; built files are packaged under `src/web/assets/`.
+Node.js 22.12+ is required for source builds, but not for installed distributions.
+See the [startup and operation guide](../../docs/weave-web.md) for configuration,
+first-use steps, development, and troubleshooting.
+
 Weave is the product application built on the current public Pleiad SDK. Its flat `src/` directory installs as `pleiad_weave`; `packages/pleiad/src/` installs independently as `pleiad`.
 
 `ExecutionService` is the shared CLI, HTTP, and TUI boundary. `WeaveAgent` declares an SDK Agent and consumes Runner streams. Graph proposals bind to SDK Graph/Node objects; product wrappers only persist revision, attempt, and artifact records. Model roles bind directly to OpenAIModelClient or AnthropicModelClient. Default file/command Tools, ShortMemory, and OCI execution come from the SDK.

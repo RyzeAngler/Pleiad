@@ -24,7 +24,7 @@ from pleiad_weave.infrastructure.config import Settings
 from pleiad_weave.infrastructure.storage.graphs import GraphRevision
 from pleiad_weave.infrastructure.storage.models import ExecutionStatus
 from pleiad_weave.tui.app import PleiadApp
-from pleiad_weave.tui.log_bridge import TuiLogHandler, safe_log_message
+from pleiad_weave.tui.log_bridge import TuiLogHandler
 from pleiad_weave.tui.projection import TuiProjection
 from pleiad_weave.tui.screens.approvals import ApprovalScreen
 from pleiad_weave.tui.screens.main import MainScreen
@@ -209,10 +209,23 @@ class TuiWidgetApp(App[None]):
         yield MainScreen()
 
 
-def test_program_log_redacts_credentials_before_rendering() -> None:
-    assert safe_log_message("token=abc Authorization: Bearer xyz normal") == (
-        "token=[REDACTED] Authorization=[REDACTED] normal"
-    )
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("token=abc Authorization: Bearer xyz normal", "token=[REDACTED] Authorization=[REDACTED] normal"),
+        (
+            "MCP https://maps.example/mcp?key=first&mode=driving&AK=second",
+            "MCP https://maps.example/mcp?key=[REDACTED]&mode=driving&AK=[REDACTED]",
+        ),
+    ],
+)
+def test_program_log_redacts_credentials_before_rendering(message: str, expected: str) -> None:
+    records: list[LogRecordView] = []
+    record = logging.LogRecord("pleiad", logging.ERROR, __file__, 1, message, (), None)
+
+    TuiLogHandler(records.append).emit(record)
+
+    assert records[0].message == expected
 
 
 def test_answer_completion_updates_one_message_after_process_archive() -> None:

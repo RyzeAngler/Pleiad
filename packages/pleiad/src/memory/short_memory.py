@@ -117,6 +117,30 @@ class ShortMemory:
                     return message
         return None
 
+    async def clear(self) -> None:
+        """Remove all Turns and messages belonging to this memory.
+
+        Completed and active Turns, including original Tool observations, are
+        removed atomically. Repeated calls are harmless; the next Turn begins
+        at sequence one. Other memory IDs in the same database are unchanged.
+
+        The caller must stop all executions using this memory before clearing
+        it. This operation does not cancel Runs or invalidate other handles.
+
+        Raises:
+            MemoryStorageError: If persisted history cannot be cleared.
+        """
+        async with self.lock:
+            try:
+                if self.database is None:
+                    self.turns = ()
+                else:
+                    await asyncio.to_thread(sqlite.clear, self.database, self.memory_id)
+            except PleiadError as error:
+                logger.error(f"memory clear failed key={self.memory_key} code={error.code}", exc_info=True)
+                raise
+        logger.debug(f"memory cleared key={self.memory_key}")
+
     async def begin(self, agent_id: str, messages: tuple[Message, ...] = ()) -> Turn:
         """Create the next active Turn.
 

@@ -9,6 +9,7 @@ from pathlib import PurePosixPath
 from typing import Protocol
 from uuid import uuid4
 
+from pleiad.errors.base import PleiadError
 from pleiad.observability.attributes import (
     SANDBOX_BACKEND,
     SANDBOX_CLEANUP_NAME,
@@ -35,6 +36,7 @@ CONTAINER_NAME_PREFIX = "pleiad-sandbox-"
 CONTAINER_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 TMPFS_SPEC = "/tmp:rw,noexec,nosuid,size=64m"  # noqa: S108
 DIAGNOSTIC_OUTPUT_LIMIT = 64 * 1024
+ERROR_DETAIL_LIMIT = 2048
 
 
 class ProcessExecutor(Protocol):
@@ -110,9 +112,19 @@ class OciSandbox:
         """Own the concrete container lifecycle beneath one Sandbox execution."""
         if self.requires_runtime_binary and not self.available():
             raise SandboxUnavailableError(f"The selected OCI runtime is unavailable: {self.runtime}.")
+        started = time.monotonic()
+        deadline = started + request.policy.timeout_seconds
+        await self.check_runtime(deadline)
+        if remaining_seconds(deadline) <= 0:
+            return SandboxResult(
+                exit_code=None,
+                timed_out=True,
+                duration_seconds=time.monotonic() - started,
+                backend=self.runtime,
+            )
         reference = ContainerReference(create_container_identity())
         try:
-            result = await self.execute_container(request, reference)
+            result = await self.execute_container(request, reference, started=started, deadline=deadline)
         except asyncio.CancelledError as error:
             try:
                 await self.cleanup_after_cancellation(reference, request)
@@ -127,10 +139,33 @@ class OciSandbox:
             try:
                 await self.cleanup_container(reference, request)
             except SandboxCleanupError as cleanup_error:
-                raise cleanup_error from error
+                original = error.message if isinstance(error, PleiadError) else type(error).__name__
+                raise SandboxCleanupError(f"{original} Cleanup also failed: {cleanup_error.message}") from error
             raise
         await self.cleanup_container(reference, request)
         return result
+
+    async def check_runtime(self, deadline: float) -> None:
+        """Check the selected engine before any container can be created.
+
+        Args:
+            deadline: The request's absolute monotonic execution deadline.
+
+        Raises:
+            SandboxUnavailableError: If the CLI or engine is unavailable or the
+                connection check exceeds the request deadline.
+        """
+        result = await self.execute_cli(
+            (self.runtime, "info"),
+            stdin=None,
+            output_limit=DIAGNOSTIC_OUTPUT_LIMIT,
+            timeout_seconds=remaining_seconds(deadline),
+        )
+        if result.timed_out or result.returncode != 0:
+            raise SandboxUnavailableError(
+                f"The selected OCI runtime is not responding: {self.runtime}. "
+                f"Run '{self.runtime} info' to check the engine and connection."
+            )
 
     async def cleanup_after_cancellation(self, reference: ContainerReference, request: SandboxRequest) -> None:
         """Finish owned cleanup even if the caller cancels the waiting task again."""
@@ -142,10 +177,10 @@ class OciSandbox:
             except asyncio.CancelledError:
                 continue
 
-    async def execute_container(self, request: SandboxRequest, reference: ContainerReference) -> SandboxResult:
+    async def execute_container(
+        self, request: SandboxRequest, reference: ContainerReference, *, started: float, deadline: float
+    ) -> SandboxResult:
         """Run the container lifecycle while retaining its confirmed identity."""
-        started = time.monotonic()
-        deadline = started + request.policy.timeout_seconds
         with self.observability.span(
             SANDBOX_CREATE_NAME,
             attributes={SANDBOX_BACKEND: self.runtime},
@@ -168,7 +203,9 @@ class OciSandbox:
                 limit=request.policy.max_output_bytes,
             )
         if create_output.returncode != 0:
-            raise SandboxExecutionError("The OCI runtime could not create the Sandbox container.")
+            raise SandboxExecutionError(
+                cli_failure_message("The OCI runtime could not create the Sandbox container.", create_output)
+            )
         reference.container_id = parse_container_id(create_output.stdout)
 
         start_output = await self.execute_cli(
@@ -201,7 +238,9 @@ class OciSandbox:
             timeout_seconds=remaining_seconds(deadline),
         )
         if inspect_output.timed_out or inspect_output.returncode != 0:
-            raise SandboxExecutionError("The OCI runtime could not inspect the Sandbox exit status.")
+            raise SandboxExecutionError(
+                cli_failure_message("The OCI runtime could not inspect the Sandbox exit status.", inspect_output)
+            )
         return SandboxResult(
             exit_code=parse_exit_code(inspect_output.stdout),
             stdout=stdout,
@@ -284,7 +323,7 @@ class OciSandbox:
     async def cleanup_cli(self, command: tuple[str, ...], deadline: float) -> ProcessResult:
         """Run a cleanup command under the independent cleanup deadline."""
         remaining = remaining_seconds(deadline)
-        if remaining is None:
+        if remaining <= 0:
             raise SandboxCleanupError("The Sandbox cleanup budget was exhausted.")
         try:
             return await self.process_executor(
@@ -295,6 +334,15 @@ class OciSandbox:
             )
         except OSError as error:
             raise SandboxCleanupError("The OCI runtime could not execute the Sandbox cleanup command.") from error
+
+
+def cli_failure_message(message: str, result: ProcessResult) -> str:
+    """Append bounded CLI stderr without serializing commands or environment values."""
+    detail = result.stderr[:ERROR_DETAIL_LIMIT].decode("utf-8", errors="replace").strip()
+    if not detail:
+        return message
+    suffix = " [truncated]" if len(result.stderr) > ERROR_DETAIL_LIMIT else ""
+    return f"{message} Runtime stderr: {detail}{suffix}"
 
 
 def create_container_identity() -> ContainerIdentity:
@@ -338,6 +386,8 @@ def build_create_command(request: SandboxRequest, runtime: str, identity: Contai
         "--workdir",
         str(request.cwd),
     ]
+    if request.stdin is not None:
+        command.append("--interactive")
     for mount in request.mounts:
         command.extend(("--mount", mount_argument(mount.source.as_posix(), mount.target, mount.read_only)))
     for key, value in sorted(request.environment.items()):
@@ -479,7 +529,6 @@ def container_missing(result: ProcessResult) -> bool:
     return "no such object" in diagnostic or "no such container" in diagnostic or "not found" in diagnostic
 
 
-def remaining_seconds(deadline: float) -> float | None:
-    """Return a positive remaining budget or None when the deadline is exhausted."""
-    remaining = deadline - time.monotonic()
-    return remaining if remaining > 0 else None
+def remaining_seconds(deadline: float) -> float:
+    """Return the remaining budget, using zero for an exhausted deadline."""
+    return max(0.0, deadline - time.monotonic())

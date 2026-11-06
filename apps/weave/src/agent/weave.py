@@ -42,6 +42,7 @@ from pleiad_weave.capabilities.approval import RequiresApprovalTool, with_approv
 from pleiad_weave.capabilities.catalog import CapabilitySnapshot, refresh_capabilities
 from pleiad_weave.infrastructure.storage.graphs import GraphConflictError, GraphRevision, TaskGraphStore
 from pleiad_weave.infrastructure.storage.memory import MemoryStore
+from pleiad_weave.infrastructure.storage.workspaces import SavedGraphReference
 
 
 class SearchArguments(ContractModel):
@@ -98,6 +99,7 @@ class InspectArguments(ContractModel):
     """Select one stored graph definition."""
 
     graph_id: str = Field(min_length=1)
+    graph_revision: int | None = Field(default=None, ge=1)
 
 
 class RecallArguments(ContractModel):
@@ -115,6 +117,7 @@ class GraphControls:
     execution_id: str
     conversation_id: str
     snapshot: CapabilitySnapshot
+    context_blocks: tuple[ContextBlock, ...]
 
     def tools(self) -> tuple[BaseTool, ...]:
         """Declare the product operations available to the supervisor Agent."""
@@ -238,7 +241,11 @@ class GraphControls:
         self.owner.execution_graphs[self.execution_id] = (stored.graph.graph_id, stored.graph.revision)
         await self.refresh()
         graph = build_graph(
-            stored.graph, self.owner.models, self.node_runner(), approval_tool_codes=self.owner.approval_tool_codes
+            stored.graph,
+            self.owner.models,
+            self.node_runner(),
+            approval_tool_codes=self.owner.approval_tool_codes,
+            context_blocks=self.context_blocks,
         )
         result = await self.owner.graph_executor.execute(
             graph, selected.input, execution_id=self.execution_id, context=context
@@ -273,9 +280,13 @@ class GraphControls:
     async def inspect(self, context: ToolContext, arguments: JsonObject) -> JsonObject:
         """Read one revisioned product graph without accessing runtime state."""
         selected = InspectArguments.model_validate(arguments)
-        stored = await asyncio.to_thread(self.owner.graph_store.current, selected.graph_id)
+        stored = (
+            await asyncio.to_thread(self.owner.graph_store.current, selected.graph_id)
+            if selected.graph_revision is None
+            else await asyncio.to_thread(self.owner.graph_store.revision, selected.graph_id, selected.graph_revision)
+        )
         if stored is None:
-            raise LookupError(f"Graph not found: {selected.graph_id}")
+            raise LookupError(f"Graph revision not found: {selected.graph_id}@{selected.graph_revision}")
         return stored.graph.model_dump(mode="json")
 
     async def recall(self, context: ToolContext, arguments: JsonObject) -> JsonObject:
@@ -406,8 +417,27 @@ class WeaveAgent:
         resolutions: tuple[InterruptionResponse, ...] = (),
     ) -> RunResult:
         """Execute the supervisor using SDK memory, streaming, and Tool runtime."""
+        space = business_input.get("weave_space")
+        if isinstance(space, dict) and space.get("saved_graph") is not None:
+            saved_graph = SavedGraphReference.model_validate(space["saved_graph"])
+            self.execution_graphs.setdefault(execution_id, (saved_graph.graph_id, saved_graph.revision))
         snapshot = await self.capabilities()
-        controls = GraphControls(self, execution_id, conversation_id, snapshot)
+        blocks = (
+            ()
+            if not business_input
+            else (
+                ContextBlock(
+                    kind="business_input",
+                    origin="weave.request",
+                    content=json.dumps(business_input, ensure_ascii=False),
+                ),
+            )
+        )
+        node_context = (
+            ContextBlock(kind="task_request", origin="weave.execution", content=objective),
+            *blocks,
+        )
+        controls = GraphControls(self, execution_id, conversation_id, snapshot, node_context)
         control_tools = controls.tools()
         for tool in control_tools:
             snapshot.tools.register(tool.descriptor, bind_tool(tool))
@@ -439,17 +469,6 @@ class WeaveAgent:
             skills=snapshot.skills,
             tool_runtime=ToolRuntime(),
             observability=self.observability,
-        )
-        blocks = (
-            ()
-            if not business_input
-            else (
-                ContextBlock(
-                    kind="business_input",
-                    origin="weave.request",
-                    content=json.dumps(business_input, ensure_ascii=False),
-                ),
-            )
         )
         memory = self.memory.session(conversation_id)
         result: RunResult | None = None

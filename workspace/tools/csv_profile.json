@@ -1,0 +1,76 @@
+{
+  "script": "csv_profile.py",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Workspace-relative path to a UTF-8 CSV with a unique header and comma delimiter."
+      },
+      "numeric_columns": {
+        "type": "array",
+        "items": { "type": "string", "minLength": 1 },
+        "uniqueItems": true,
+        "default": [],
+        "description": "Explicit header names to summarize as finite numbers. Other columns remain text; no type inference."
+      },
+      "sample_size": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 5,
+        "default": 3,
+        "description": "First non-empty samples per column, each limited to 200 characters."
+      }
+    },
+    "required": ["path"],
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "path": { "type": "string" },
+      "row_count": { "type": "integer", "minimum": 0 },
+      "columns": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" },
+            "empty_count": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Only zero-length cells are empty; whitespace and NULL text are preserved."
+            },
+            "samples": {
+              "type": "array",
+              "maxItems": 5,
+              "items": { "type": "string", "maxLength": 200 }
+            },
+            "numeric": {
+              "anyOf": [
+                { "type": "null" },
+                {
+                  "type": "object",
+                  "properties": {
+                    "valid_count": { "type": "integer", "minimum": 0 },
+                    "invalid_count": { "type": "integer", "minimum": 0 },
+                    "minimum": { "type": ["number", "null"] },
+                    "maximum": { "type": ["number", "null"] },
+                    "mean": { "type": ["number", "null"] }
+                  },
+                  "required": ["valid_count", "invalid_count", "minimum", "maximum", "mean"],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          },
+          "required": ["name", "empty_count", "samples", "numeric"],
+          "additionalProperties": false
+        }
+      }
+    },
+    "required": ["path", "row_count", "columns"],
+    "additionalProperties": false
+  }
+}

@@ -41,6 +41,27 @@ def active(database: Path, memory_id: str) -> Turn | None:
     return None
 
 
+def clear(database: Path, memory_id: str) -> None:
+    """Remove one memory and all of its messages and Turns in one transaction.
+
+    Args:
+        database: SQLite database containing the memory.
+        memory_id: Identity of the memory to clear, which may not exist.
+
+    Raises:
+        MemoryStorageError: If any delete fails; the transaction is rolled back.
+    """
+    try:
+        with connect(database) as connection:
+            initialize_schema(connection)
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("DELETE FROM messages WHERE memory_id = ?", (memory_id,))
+            connection.execute("DELETE FROM turns WHERE memory_id = ?", (memory_id,))
+            connection.execute("DELETE FROM short_memories WHERE memory_id = ?", (memory_id,))
+    except (OSError, sqlite3.Error) as error:
+        raise MemoryStorageError(f"SQLite clear failed for memory {memory_id}.") from error
+
+
 def begin(database: Path, memory_id: str, agent_id: str, messages: tuple[Message, ...]) -> Turn:
     """Create an active Turn in one SQLite transaction."""
     try:

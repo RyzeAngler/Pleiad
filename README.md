@@ -50,7 +50,8 @@ flowchart LR
 - 多模型提供商适配与流式响应；
 - 统一错误模型和终止性错误判断；
 - 顺序产品事件、程序日志和显式 OpenTelemetry 接入；
-- 命令行、终端界面和 HTTP 接口；
+- 命令行、终端界面、网页工作区和 HTTP 接口；
+- 可复用空间、独立任务会话、对话驱动的 Graph 与执行可视化；
 - 节点输入、输出和最终结果的结构校验。
 
 Pleiad 框架本身不依赖 TUI、FastAPI、Typer、Uvicorn、Loguru 或具体应用配置。第三方可以只安装 `pleiad`，使用公开 Runner、Tool、Skill、Graph 和 Sandbox 契约开发自己的应用。
@@ -61,8 +62,12 @@ Pleiad 框架本身不依赖 TUI、FastAPI、Typer、Uvicorn、Loguru 或具体�
 - [uv](https://docs.astral.sh/uv/) 0.11.22（版本由 `.uv-version` 固定；SDK 与 App 各自维护锁文件）
 - 一个受支持模型提供商的接口密钥
 - Docker 或 Podman（执行工作区代码时需要）
+- Node.js 22.12+ 与 npm（从源码构建网页时需要；发行包自带网页资源）
 
 ## 快速开始
+
+默认工作区已预置数据工具、研究/旅游/写作等 Skill 与 MCP 连接，接入方式见
+[Weave 默认能力](docs/weave-capabilities.md)。连接初始关闭，配置后进入现有资源目录。
 
 ```bash
 # Run from the repository root after cloning the project.
@@ -93,19 +98,28 @@ uv run --project apps/weave --frozen pleiad tui
 uv run --project apps/weave --frozen pleiad run "读取工作区中的资料并生成摘要"
 ```
 
-启动 HTTP 服务：
+启动网页与 HTTP 服务：
 
 ```bash
+npm --prefix apps/weave/web ci
+npm --prefix apps/weave/web run build
 uv run --project apps/weave --frozen pleiad serve
 ```
 
-默认监听 `127.0.0.1:8000`。需要从其他设备访问时，可以显式传入 `--host 0.0.0.0`。接口包括：
+浏览器打开 **http://127.0.0.1:8000/**。完整的配置、沙箱准备、页面操作、前端开发与故障处理见 [Weave 网页版启动与操作](docs/weave-web.md)。网页与 API 复用同一个 ExecutionService，不能同时启动另一个拥有相同工作区的 TUI 或服务。
+
+默认监听 `127.0.0.1:8000`，当前是没有多用户鉴权的本地单所有者部署。接口包括：
 
 - `GET /healthz`
 - `POST /v1/executions`
 - `GET /v1/executions/{execution_id}`
 - `POST /v1/executions/{execution_id}/cancel`
 - `GET /v1/executions/{execution_id}/events`
+- `GET /v1/executions/{execution_id}/stream`
+- `GET /v1/executions/{execution_id}/details`
+- `GET/POST /v1/spaces`
+- `GET/POST /v1/spaces/{space_id}/conversations`
+- `GET /v1/resources`
 
 事件回放支持 `?after_sequence=<integer>`，只返回序号更大的持久化事件。事件先写入 SQLite journal，再分发给在线监听者；模型文本增量只在线分发，不写入 journal，思维增量不进入事件流。单条持久化事件的序列化大小上限为 16 KiB。
 
@@ -149,6 +163,7 @@ runtime/
 ├── node-runs/     节点运行记录
 ├── artifacts/     节点结构化产物
 ├── scratch/       命令与 Skill 的临时产物
+├── workspaces/    空间与独立任务会话元数据
 └── memory/        SDK ShortMemory SQLite 与产品授权事实 JSONL
 ```
 
@@ -184,6 +199,7 @@ apps/weave/src/      # 安装后的 Python 包名：pleiad_weave
 ├── infrastructure/  配置、provider、存储、日志和沙箱准备
 ├── api/             FastAPI 入口
 ├── tui/             Textual 终端界面
+├── web/             随 Python 包发行的网页构建资源
 ├── resources/       随应用发行的 Skill 和沙箱镜像定义
 └── cli.py           pleiad 命令入口
 ```
@@ -192,7 +208,7 @@ apps/weave/src/      # 安装后的 Python 包名：pleiad_weave
 
 ## 开发与验证
 
-SDK 与 App 是独立 Python 项目，各自在自己的目录维护依赖、锁文件和测试配置。App 开发环境通过本地路径使用 SDK；发行安装使用 `pleiad==0.1.1`。
+SDK 与 App 是独立 Python 项目，各自在自己的目录维护依赖、锁文件和测试配置。App 开发环境通过本地路径使用 SDK；发行安装使用 `pleiad[mcp]==0.1.2`，包含节点上下文传递、会话记忆清理 API 和 MCP stdio 会话隔离。发布 Weave 前需先发布此 SDK 版本。
 
 ```bash
 uv sync --project packages/pleiad --locked --all-groups --all-extras
@@ -207,9 +223,14 @@ uv run --directory apps/weave --frozen ruff check .
 uv run --directory apps/weave --frozen mypy
 uv run --directory apps/weave --frozen pytest -q -m 'not packaging and not oci and not provider_e2e'
 uv run --project apps/weave --frozen lint-imports --config .importlinter
+
+npm --prefix apps/weave/web run typecheck
+npm --prefix apps/weave/web run format:check
+npm --prefix apps/weave/web test
+npm --prefix apps/weave/web run build
 ```
 
-贡献代码前请阅读 [贡献指南](CONTRIBUTING.md)。`docs/` 只保留 [Pleiad 架构设计](docs/pleiad-architecture.md) 和 [Weave 架构设计](docs/weave-architecture.md)，通过 C4 视图说明核心理念、系统边界与组件协作；架构图使用内嵌 Mermaid。
+贡献代码前请阅读 [贡献指南](CONTRIBUTING.md)。[Pleiad 架构设计](docs/pleiad-architecture.md) 和 [Weave 架构设计](docs/weave-architecture.md) 通过 C4 视图说明核心理念、系统边界与组件协作；架构图使用内嵌 Mermaid。网页使用与配置见 [Web 启动文档](docs/weave-web.md)。
 
 ## 许可
 

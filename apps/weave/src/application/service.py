@@ -26,6 +26,7 @@ from pleiad_weave.application.events import (
     current_trace_ids,
     execution_event_from_record,
 )
+from pleiad_weave.application.workspaces import execution_input
 from pleiad_weave.infrastructure.logging import shutdown_logging
 from pleiad_weave.infrastructure.storage.models import (
     ApprovalDecision,
@@ -33,8 +34,11 @@ from pleiad_weave.infrastructure.storage.models import (
     ExecutionRecord,
     ExecutionResumeState,
     ExecutionStatus,
+    GraphRunRecord,
+    NodeRunRecord,
 )
 from pleiad_weave.infrastructure.storage.repository import ExecutionRepository
+from pleiad_weave.infrastructure.storage.workspaces import WorkspaceConflictError, WorkspaceRepository
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +56,13 @@ class ExecutionService:
     state_signals: dict[str, asyncio.Event] = field(default_factory=dict, init=False)
     owner_descriptor: int | None = field(default=None, init=False)
     ownership_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    workspace_mutation_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     closed: bool = field(default=False, init=False)
+
+    @property
+    def workspaces(self) -> WorkspaceRepository:
+        """Resolve product workspace metadata beside the existing Execution journal."""
+        return WorkspaceRepository(self.repository.path.parent.parent / "workspaces")
 
     @property
     def model_name(self) -> str:
@@ -178,31 +188,155 @@ class ExecutionService:
         if self.closed:
             raise RuntimeError("Execution service is shut down")
         await self.ensure_owner()
-        task = asyncio.create_task(self.create_execution(request))
-        try:
-            queued = await asyncio.shield(task)
-        except asyncio.CancelledError:
-            queued = await task
+
+        async def persist_and_schedule() -> ExecutionRecord:
+            """Keep the owned persistence transaction and scheduling inseparable."""
+            queued = await self.create_execution(request)
             self.schedule(queued.execution_id)
-            raise
-        self.schedule(queued.execution_id)
-        return queued
+            return queued
+
+        return await wait_owned_operation(asyncio.create_task(persist_and_schedule()))
 
     async def create_execution(self, request: ExecuteRequest) -> ExecutionRecord:
         """Commit a queued job and its first event in one transaction."""
-        record, event = await asyncio.to_thread(
-            self.repository.create,
-            ExecutionRecord(
-                execution_id=uuid4().hex,
-                conversation_id=request.conversation_id,
-                objective=request.objective,
-                input=request.input,
-                status=ExecutionStatus.QUEUED,
-            ),
-            event=ExecutionEventInput(event_type="execution.queued", data={"objective": request.objective}),
+        async with self.workspace_mutation_lock:
+            business_input = await asyncio.to_thread(
+                execution_input, self.workspaces, request.conversation_id, request.input
+            )
+            record, event = await asyncio.to_thread(
+                self.repository.create,
+                ExecutionRecord(
+                    execution_id=uuid4().hex,
+                    conversation_id=request.conversation_id,
+                    objective=request.objective,
+                    input=business_input,
+                    status=ExecutionStatus.QUEUED,
+                ),
+                event=ExecutionEventInput(event_type="execution.queued", data={"objective": request.objective}),
+            )
+            self.event_bus.publish(execution_event_from_record(event))
+            return record
+
+    async def delete_workspace(self, *, space_id: str | None = None, conversation_id: str | None = None) -> None:
+        """Delete a stopped space or task and finish cleanup if the client disconnects.
+
+        Exactly one identity is required. Configured capabilities and workspace files
+        are never owned by a task and are not deleted.
+
+        Raises:
+            LookupError: If the requested space or task no longer exists.
+            WorkspaceConflictError: If an execution is active or shared with another task.
+        """
+        if (space_id is None) == (conversation_id is None):
+            raise ValueError("Provide exactly one space or conversation identity")
+        if self.closed:
+            raise RuntimeError("Execution service is shut down")
+        await self.ensure_owner()
+        await wait_owned_operation(
+            asyncio.create_task(self.delete_workspace_owned(space_id=space_id, conversation_id=conversation_id))
         )
-        self.event_bus.publish(execution_event_from_record(event))
-        return record
+
+    async def delete_workspace_owned(self, *, space_id: str | None, conversation_id: str | None) -> None:
+        """Serialize deletion with task creation and space configuration updates."""
+        async with self.workspace_mutation_lock:
+            if space_id is not None:
+                conversations = await asyncio.to_thread(self.workspaces.list_conversations, space_id)
+                conversation_ids = frozenset(item.conversation_id for item in conversations)
+            elif conversation_id is not None:
+                conversation = await asyncio.to_thread(self.workspaces.get_conversation, conversation_id)
+                if conversation is None:
+                    raise LookupError("任务不存在或已删除")
+                conversation_ids = frozenset({conversation_id})
+            else:
+                raise ValueError("A deletion target is required")
+            records = await asyncio.to_thread(self.repository.list_records)
+            execution_ids = frozenset(
+                record.execution_id for record in records if record.conversation_id in conversation_ids
+            )
+            if any(
+                record.parent_execution_id in execution_ids and record.execution_id not in execution_ids
+                for record in records
+            ):
+                raise WorkspaceConflictError("存在属于其他任务的子执行。请先处理关联任务")
+            terminal = {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}
+            if any(record.status not in terminal for record in records if record.execution_id in execution_ids):
+                raise WorkspaceConflictError("仍有任务在执行、排队或等待确认。请先停止任务再删除")
+            if any(
+                task is not None and not task.done()
+                for identity in execution_ids
+                for task in (self.tasks.get(identity), self.expiry_tasks.get(identity))
+            ):
+                raise WorkspaceConflictError("任务正在结束。请稍后再删除")
+            graph_revisions = await asyncio.to_thread(self.deletion_graphs, execution_ids, space_id)
+            if graph_revisions and (
+                any(record.status not in terminal for record in records if record.execution_id not in execution_ids)
+                or any(
+                    not task.done()
+                    for identity, task in (*self.tasks.items(), *self.expiry_tasks.items())
+                    if identity not in execution_ids
+                )
+            ):
+                raise WorkspaceConflictError("其他任务尚未结束。相关编排可能仍被使用。请等待执行结束后再删除")
+            for identity in conversation_ids:
+                await self.weave.memory.clear_conversation(identity)
+            await asyncio.to_thread(self.delete_runtime_records, execution_ids, graph_revisions)
+            await asyncio.to_thread(self.workspaces.delete, conversation_ids, space_id=space_id)
+            for identity in execution_ids:
+                self.state_signals.pop(identity, None)
+                self.weave.execution_graphs.pop(identity, None)
+
+    def deletion_graphs(self, execution_ids: frozenset[str], space_id: str | None) -> frozenset[tuple[str, int]]:
+        """Select unreferenced revisions before any destructive task cleanup."""
+        runner = self.weave.graph_executor
+        graph_runs = runner.graphs.list_records()
+        node_runs = runner.nodes.list_records()
+        removed_graphs: set[tuple[str, int]] = set()
+        retained_graphs: set[tuple[str, int]] = set()
+        for record in self.repository.list_records():
+            references = removed_graphs if record.execution_id in execution_ids else retained_graphs
+            if record.graph_id is not None and record.graph_revision is not None:
+                references.add((record.graph_id, record.graph_revision))
+            context = record.input.get("weave_space")
+            if isinstance(context, dict) and isinstance(saved := context.get("saved_graph"), dict):
+                graph_id, revision = saved.get("graph_id"), saved.get("revision")
+                if isinstance(graph_id, str) and isinstance(revision, int):
+                    references.add((graph_id, revision))
+            for event in self.repository.read_events(record.execution_id):
+                if event.event_type == "graph.revision.accepted":
+                    graph_id, revision = event.data.get("graph_id"), event.data.get("revision")
+                    if isinstance(graph_id, str) and isinstance(revision, int):
+                        references.add((graph_id, revision))
+        attempts: tuple[GraphRunRecord | NodeRunRecord, ...] = (*graph_runs, *node_runs)
+        for attempt in attempts:
+            references = removed_graphs if attempt.execution_id in execution_ids else retained_graphs
+            references.add((attempt.graph_id, attempt.graph_revision))
+        for space in self.workspaces.list_spaces():
+            if space.saved_graph is not None:
+                references = removed_graphs if space.space_id == space_id else retained_graphs
+                references.add((space.saved_graph.graph_id, space.saved_graph.revision))
+        return frozenset(removed_graphs - retained_graphs)
+
+    def delete_runtime_records(
+        self, execution_ids: frozenset[str], graph_revisions: frozenset[tuple[str, int]]
+    ) -> None:
+        """Remove owned execution data while retaining references used elsewhere."""
+        runner = self.weave.graph_executor
+        graph_runs = runner.graphs.list_records()
+        node_runs = runner.nodes.list_records()
+        retained_artifacts = {
+            node.artifact_id for node in node_runs if node.execution_id not in execution_ids and node.artifact_id
+        }
+        for graph_id, revision in graph_revisions:
+            self.weave.graph_store.delete_revision(graph_id, revision)
+        for node in node_runs:
+            if node.execution_id in execution_ids:
+                if node.artifact_id is not None and node.artifact_id not in retained_artifacts:
+                    runner.artifacts.delete(node.artifact_id)
+                runner.nodes.delete(node.node_run_id)
+        for graph_run in graph_runs:
+            if graph_run.execution_id in execution_ids:
+                runner.graphs.delete(graph_run.graph_run_id)
+        self.repository.delete(execution_ids)
 
     def schedule(self, execution_id: str) -> asyncio.Task[ExecutionRecord]:
         """Retain and observe the task until its product state has settled."""

@@ -13,6 +13,7 @@ from pydantic import ConfigDict, TypeAdapter, ValidationError
 from pleiad_weave.api.app import create_app
 from pleiad_weave.application.dto import ApprovalRequest, ExecuteRequest
 from pleiad_weave.application.errors import ApprovalConflictError
+from pleiad_weave.capabilities.mcp import create_mcp_server, load_mcp_configuration
 from pleiad_weave.infrastructure.bootstrap import create_application
 from pleiad_weave.infrastructure.config import MemorySettings, Settings
 from pleiad_weave.infrastructure.storage.models import ExecutionStatus
@@ -25,6 +26,25 @@ approval_app = typer.Typer(help="Inspect and decide persisted Tool approval requ
 app.add_typer(approval_app, name="approval")
 app.add_typer(memory_app, name="memory")
 JSON_OBJECT_ADAPTER = TypeAdapter[JsonObject](JsonObject, config=ConfigDict(strict=True, allow_inf_nan=False))
+
+
+@app.command("mcp-login")
+def mcp_login(server_code: str) -> None:
+    """Authorize one configured MCP server without starting the model or sandbox."""
+    settings = MemorySettings()
+    configuration = load_mcp_configuration(settings.workspace)
+    connection = next((item for item in configuration.servers if item.code == server_code), None)
+    if connection is None:
+        raise typer.BadParameter(f"MCP server is not configured: {server_code}")
+    server = create_mcp_server(connection, settings.workspace, interactive=True)
+
+    async def login() -> None:
+        """Complete consent and check tool discovery without executing actions."""
+        async with server.client as client:
+            tools = await client.list_tools()
+        typer.echo(f"MCP connection ready: {server_code} ({len(tools)} tools)")
+
+    asyncio.run(login())
 
 
 @app.command()
@@ -64,7 +84,7 @@ def serve(
     host: str = typer.Option("127.0.0.1", "--host"),
     port: int = typer.Option(8000, "--port"),
 ) -> None:
-    """Start the HTTP API."""
+    """Start the Web workspace and HTTP API on one local service."""
     service = create_application()
     uvicorn.run(create_app(service), host=host, port=port)
 

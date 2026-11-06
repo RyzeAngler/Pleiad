@@ -38,7 +38,7 @@ def test_real_oci_preserves_command_facts_and_mount_permissions(
         policy=policy,
         shell_command=(
             'if [ "$(id -u)" = "0" ]; then exit 8; fi; '
-            "if printf forbidden > /pleiad/workspace/blocked; then exit 9; fi; "
+            "if { printf forbidden > /pleiad/workspace/blocked; } 2>/dev/null; then exit 9; fi; "
             "printf generated > /pleiad/scratch/generated.txt; "
             "printf out; printf err >&2; exit 7"
         ),
@@ -56,3 +56,31 @@ def test_real_oci_preserves_command_facts_and_mount_permissions(
     assert result.timed_out is False
     assert not (workspace / "blocked").exists()
     assert (scratch / "generated.txt").read_text(encoding="utf-8") == "generated"
+
+
+@pytest.mark.oci
+@pytest.mark.parametrize(
+    ("runtime", "image_environment"),
+    [("docker", "PLEIAD_DOCKER_SANDBOX_IMAGE"), ("podman", "PLEIAD_PODMAN_SANDBOX_IMAGE")],
+    ids=("docker", "podman"),
+)
+@pytest.mark.parametrize("payload", [b'{"value":"input"}\n\x00\xff', b""], ids=("binary", "empty"))
+def test_real_oci_delivers_stdin_bytes_and_eof_to_the_container(
+    runtime: str, image_environment: str, payload: bytes
+) -> None:
+    image = os.environ.get(image_environment)
+    if image is None:
+        pytest.skip(f"set {image_environment} to a pre-pulled sha256 image digest")
+    request = SandboxRequest(
+        cwd=PurePosixPath("/"),
+        policy=SandboxPolicy(image=image, max_output_bytes=64),
+        argv=("python", "-c", "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())"),
+        stdin=payload,
+    )
+
+    result = asyncio.run(Sandbox(OciSandbox(runtime)).execute(request))
+
+    assert result.exit_code == 0
+    assert result.stdout == payload
+    assert result.stderr == b""
+    assert result.timed_out is False

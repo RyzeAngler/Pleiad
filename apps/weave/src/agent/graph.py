@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from pleiad.agent.agent import Agent
 from pleiad.agent.errors import AgentConfigurationError
+from pleiad.context.selection.models import ContextBlock
 from pleiad.contracts import JsonObject, SkillRef, ToolRef
 from pleiad.errors.base import PleiadError
 from pleiad.events.contracts import Event
@@ -34,6 +35,7 @@ def build_graph(
     runner: Runner,
     *,
     approval_tool_codes: frozenset[str] = frozenset(),
+    context_blocks: tuple[ContextBlock, ...] = (),
 ) -> Graph:
     """Bind persisted product instructions to the SDK's executable Graph.
 
@@ -41,6 +43,8 @@ def build_graph(
         spec: Validated product graph proposal.
         models: Explicit host model-role bindings.
         runner: SDK Runner owning the Tool and Skill snapshot.
+        approval_tool_codes: Tool codes that cannot run inside a Graph yet.
+        context_blocks: Execution-local references shared by every Agent Node.
 
     Returns:
         An executable SDK Graph.
@@ -77,6 +81,7 @@ def build_graph(
                 output_schema=node.output_schema,
                 agent=agent,
                 runner=runner,
+                context_blocks=context_blocks,
             )
         )
     return Graph(
@@ -149,7 +154,15 @@ class GraphRunner:
             result = await self.executor.execute(
                 graph,
                 graph_input,
-                NodeExecutor(execution_id, graph.graph_id, graph.revision, self.nodes, self.artifacts, self.publisher),
+                NodeExecutor(
+                    execution_id,
+                    graph.graph_id,
+                    graph.revision,
+                    self.nodes,
+                    self.artifacts,
+                    self.publisher,
+                    graph_run_id=record.graph_run_id,
+                ),
                 event_sink=publish,
                 context=context,
             )
@@ -179,6 +192,7 @@ class GraphRunner:
             record.model_copy(
                 update={
                     "status": result.status,
+                    "state": result.state,
                     "outputs": result.outputs,
                     "error": error,
                     "finished_at": datetime.now(UTC),

@@ -62,6 +62,13 @@ class MemoryStore:
         """Serialize product Executions sharing one conversation."""
         return self.session_locks.setdefault(conversation_id, asyncio.Lock())
 
+    async def clear_conversation(self, conversation_id: str) -> None:
+        """Clear a stopped task's SDK history and conversation-scoped product facts."""
+        async with self.session_lock(conversation_id):
+            await self.session(conversation_id).clear()
+            await asyncio.to_thread(self.fact_path("conversation", conversation_id).unlink, missing_ok=True)
+            self.memories.pop(conversation_id, None)
+
     def save_fact(self, fact: MemoryFact) -> None:
         """Create one host-authored revision-1 fact without replacing prior facts.
 
