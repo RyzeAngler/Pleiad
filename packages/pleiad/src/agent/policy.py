@@ -13,6 +13,6 @@ class AgentPolicyHints(ContractModel):
     model_config = ConfigDict(strict=True)
 
     timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
-    max_turns: int | None = Field(default=None, gt=0)
+    max_model_steps: int | None = Field(default=None, gt=0)
     max_output_tokens: int | None = Field(default=None, gt=0)
     grants: CapabilityGrants | None = None

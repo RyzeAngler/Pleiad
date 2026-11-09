@@ -3,10 +3,6 @@ from pleiad.errors.base import ErrorType, PleiadError
 from pydantic import Field
 
 
-class ApprovalConflictError(ValueError):
-    """Reject a stale or conflicting decision without changing an approved action."""
-
-
 class ErrorRecord(ContractModel):
     """Serialize a classified failure in a durable Weave product record."""
 

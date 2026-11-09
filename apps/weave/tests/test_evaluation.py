@@ -19,7 +19,7 @@ from pleiad_weave.evaluation import (
     score_output,
 )
 from pleiad_weave.infrastructure.config import Settings
-from tests.test_execution import PINNED_IMAGE, ScriptedProvider
+from tests.provider_fake import PINNED_IMAGE, ScriptedProvider
 
 
 def task() -> EvaluationCase:
@@ -111,7 +111,7 @@ def test_evaluation_runs_real_components_and_fails_forbidden_tool_attempts(
     assert result.run_id is not None and result.usage is not None
     assert result.usage.input_tokens == 2 and result.usage.output_tokens == 2
     assert result.usage.model_calls == 2
-    assert result.attempted_tools == (("command",) if unauthorized else ("read_file",))
+    assert result.attempted_tools == (("unknown:command",) if unauthorized else ("read_file",))
 
 
 def test_evaluation_records_unknown_usage_and_budget_exhaustion_without_fabricating_a_pass(

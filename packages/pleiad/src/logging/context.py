@@ -11,8 +11,11 @@ class LogContext:
     """Validated correlation fields bound to one execution context."""
 
     execution_id: str | None = None
+    run_id: str | None = None
+    call_id: str | None = None
+    message_id: str | None = None
     session_id: str | None = None
-    turn_id: str | None = None
+    step_id: str | None = None
     trace_id: str | None = None
     span_id: str | None = None
     agent_name: str | None = None
@@ -34,8 +37,11 @@ class LogContext:
 
 LOG_CONTEXT_FIELDS = (
     "execution_id",
+    "run_id",
+    "call_id",
+    "message_id",
     "session_id",
-    "turn_id",
+    "step_id",
     "trace_id",
     "span_id",
     "agent_name",
@@ -74,8 +80,11 @@ def bind_log_context(**fields: str | None) -> Iterator[LogContext]:
     current = current_log_context()
     context = LogContext(
         execution_id=fields.get("execution_id", current.execution_id),
+        run_id=fields.get("run_id", current.run_id),
+        call_id=fields.get("call_id", current.call_id),
+        message_id=fields.get("message_id", current.message_id),
         session_id=fields.get("session_id", current.session_id),
-        turn_id=fields.get("turn_id", current.turn_id),
+        step_id=fields.get("step_id", current.step_id),
         trace_id=fields.get("trace_id", current.trace_id),
         span_id=fields.get("span_id", current.span_id),
         agent_name=fields.get("agent_name", current.agent_name),

@@ -7,27 +7,27 @@ from pleiad.agent.agent import Agent
 from pleiad.context.selection.models import ContextBlock
 from pleiad.contracts import JsonObject, JsonSchema
 from pleiad.errors.base import ErrorType
-from pleiad.memory.short_memory import ShortMemory
 from pleiad.orchestration.graph.state import NodeResult, NodeStatus
-from pleiad.runtime.config import RunConfig
+from pleiad.runtime.checkpoint import ResumeDecision
 from pleiad.runtime.execution.control import RuntimeHandoffBinding
-from pleiad.runtime.execution.runner import Runner
-from pleiad.runtime.lifecycle.state import RunStatus
+from pleiad.runtime.limits import RunLimits
 from pleiad.runtime.policy import EffectivePolicy
+from pleiad.runtime.result import RunSuspension
+from pleiad.runtime.runner import Runner
 from pleiad.schemas import validate_json_schema
+from pleiad.sessions.backends.in_memory import InMemorySessionStore
+from pleiad.sessions.checkpoint import RunCheckpoint
+from pleiad.sessions.input import InputEnvelope
+from pleiad.sessions.records import RunStatus
+from pleiad.sessions.session import Session
+from pleiad.sessions.store import SessionStore
 
 NodeHandler = Callable[[JsonObject], Awaitable[JsonObject]]
-MemoryFactory = Callable[[str], ShortMemory]
-
-
-def default_node_memory(node_run_id: str) -> ShortMemory:
-    """Create process-local memory for one Agent graph node Run."""
-    return ShortMemory.in_memory(f"graph-node:{node_run_id}")
 
 
 @dataclass(frozen=True, slots=True)
 class Node:
-    """One executable graph node, either a normal async function or an Agent Run."""
+    """Bind one graph function or Agent invocation and its session storage."""
 
     node_id: str
     input_schema: JsonSchema = field(default_factory=lambda: {"type": "object"})
@@ -35,8 +35,8 @@ class Node:
     handler: NodeHandler | None = None
     agent: Agent | None = None
     runner: Runner | None = None
-    memory_factory: MemoryFactory = default_node_memory
-    config: RunConfig = field(default_factory=RunConfig)
+    session_store: SessionStore = field(default_factory=InMemorySessionStore)
+    limits: RunLimits = field(default_factory=RunLimits)
     handoffs: tuple[RuntimeHandoffBinding, ...] = ()
     side_effect: bool = False
     parent_run_id: str | None = None
@@ -56,59 +56,133 @@ class Node:
         validate_json_schema(self.input_schema)
         validate_json_schema(self.output_schema)
 
-    async def run(self, input_value: JsonObject) -> NodeResult:
-        """Execute this node through its bound function or the existing Runner."""
-        node_run_id = uuid4().hex
+    async def run(
+        self,
+        input_value: JsonObject,
+        *,
+        checkpoint: RunCheckpoint | None = None,
+        decisions: tuple[ResumeDecision, ...] = (),
+    ) -> NodeResult:
+        """Start or resume this node while preserving its SDK Run identity.
+
+        Args:
+            input_value: Validated node input selected by the graph.
+            checkpoint: The exact paused Run checkpoint when resuming an Agent.
+            decisions: Host resolutions for requests in that checkpoint.
+
+        Returns:
+            A confirmed terminal result or a typed paused node result.
+
+        Raises:
+            ValueError: If a function node receives an Agent checkpoint.
+        """
+        invocation_id = uuid4().hex
         if self.handler is not None:
+            if checkpoint is not None or decisions:
+                raise ValueError("Function nodes do not accept Agent resume decisions")
             output = await self.handler(input_value)
-            return NodeResult(node_id=self.node_id, node_run_id=node_run_id, status=NodeStatus.SUCCEEDED, output=output)
+            return NodeResult(
+                node_id=self.node_id, node_run_id=invocation_id, status=NodeStatus.SUCCEEDED, output=output
+            )
         if self.agent is None or self.runner is None:
             raise RuntimeError("Node executable binding is incomplete")
-        result = await self.runner.run(
-            self.agent,
-            json.dumps(input_value, ensure_ascii=False, sort_keys=True),
-            memory=self.memory_factory(node_run_id),
-            config=self.config,
-            handoffs=self.handoffs,
-            parent_run_id=self.parent_run_id,
-            parent_policy=self.parent_policy,
-            context_blocks=self.context_blocks,
+        if checkpoint is None:
+            if decisions:
+                raise ValueError("Node resume decisions require a checkpoint")
+            session = Session(f"graph-node:{invocation_id}", self.session_store)
+            input_id = f"{invocation_id}:input"
+            await session.enqueue(
+                InputEnvelope(
+                    input_id=input_id,
+                    kind="user",
+                    source=f"graph:{self.node_id}",
+                    content=json.dumps(input_value, ensure_ascii=False, sort_keys=True),
+                )
+            )
+            handle = await self.runner.start(
+                self.agent,
+                session=session,
+                invocation_id=invocation_id,
+                input_ids=(input_id,),
+                input_mode="batch",
+                limits=self.limits,
+                handoffs=self.handoffs,
+                parent_run_id=self.parent_run_id,
+                parent_policy=self.parent_policy,
+                context=self.context_blocks,
+            )
+        else:
+            session = Session(checkpoint.session_id, self.session_store)
+            handle = await self.runner.resume(
+                self.agent,
+                session=session,
+                checkpoint=checkpoint,
+                decisions=decisions,
+                limits=self.limits,
+                handoffs=self.handoffs,
+                parent_policy=self.parent_policy,
+            )
+        async with handle:
+            result = await handle.result()
+        if isinstance(result, RunSuspension):
+            return NodeResult(
+                node_id=self.node_id,
+                node_run_id=result.run_id,
+                session_id=session.session_id,
+                status=NodeStatus.PAUSED,
+                run_status=result.state,
+                usage=result.usage,
+                checkpoint=result.checkpoint,
+            )
+        journal = await session.store.snapshot(session.session_id)
+        unresolved = any(
+            item.run_id == result.run_id and item.state in {"prepared", "running", "unknown"}
+            for item in journal.tool_calls
         )
-        if result.status is RunStatus.SUCCEEDED:
-            output = result.structured_output or {"text": result.final_output}
+        if unresolved:
             return NodeResult(
                 node_id=self.node_id,
                 node_run_id=result.run_id,
+                session_id=session.session_id,
+                status=NodeStatus.UNKNOWN,
+                error_code="orchestration.graph.recovery_unknown",
+                error_message="The Agent Node has external actions requiring host reconciliation.",
+                error_type=ErrorType.BUSINESS,
+                run_status=result.state,
+                usage=result.usage,
+            )
+        if result.state is RunStatus.CANCELLED:
+            return NodeResult(
+                node_id=self.node_id,
+                node_run_id=result.run_id,
+                session_id=session.session_id,
+                status=NodeStatus.CANCELLED,
+                run_status=result.state,
+                usage=result.usage,
+            )
+        if result.state is RunStatus.SUCCEEDED:
+            result_output = result.structured_output
+            if result_output is None:
+                result_output = {"text": result.final_output}
+            return NodeResult(
+                node_id=self.node_id,
+                node_run_id=result.run_id,
+                session_id=session.session_id,
                 status=NodeStatus.SUCCEEDED,
-                output=output,
-                run_status=result.status,
+                output=result_output,
+                run_status=result.state,
                 usage=result.usage,
             )
-        if result.error is not None and result.error.type is ErrorType.BUSINESS:
-            return NodeResult(
-                node_id=self.node_id,
-                node_run_id=result.run_id,
-                status=NodeStatus.FAILED,
-                error_code=result.error.code,
-                error_message=result.error.message,
-                error_type=ErrorType.BUSINESS,
-                run_status=result.status,
-                usage=result.usage,
-            )
-        if result.status in {RunStatus.LIMIT_REACHED, RunStatus.TIMED_OUT}:
-            message = (
-                "The Agent Node exhausted its model-call or output budget."
-                if result.status is RunStatus.LIMIT_REACHED
-                else "The Agent Node reached its deadline."
-            )
-            return NodeResult(
-                node_id=self.node_id,
-                node_run_id=result.run_id,
-                status=NodeStatus.FAILED,
-                error_code=f"orchestration.graph.node_{result.status.value}",
-                error_message=message,
-                error_type=ErrorType.BUSINESS,
-                run_status=result.status,
-                usage=result.usage,
-            )
-        raise RuntimeError("Agent graph node did not complete as a business result")
+        return NodeResult(
+            node_id=self.node_id,
+            node_run_id=result.run_id,
+            session_id=session.session_id,
+            status=NodeStatus.FAILED,
+            error_code=result.error.code if result.error is not None else f"orchestration.graph.node_{result.reason}",
+            error_message=result.error.message
+            if result.error is not None
+            else f"The Agent Node stopped: {result.reason}.",
+            error_type=ErrorType.BUSINESS,
+            run_status=result.state,
+            usage=result.usage,
+        )

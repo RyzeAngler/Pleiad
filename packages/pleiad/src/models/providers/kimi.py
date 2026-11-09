@@ -3,6 +3,7 @@ from types import TracebackType
 from typing import Protocol, runtime_checkable
 
 from anthropic import AnthropicError, AsyncAnthropic
+from httpx import TimeoutException, TransportError
 from openai import AsyncOpenAI, OpenAIError
 from pydantic import SecretStr
 
@@ -12,8 +13,10 @@ from pleiad.models.anthropic.request import AnthropicRequest
 from pleiad.models.anthropic.response import AnthropicResponse, AnthropicStreamEvent, parse_event
 from pleiad.models.anthropic.response import parse_response as parse_anthropic_response
 from pleiad.models.errors import (
+    ModelConnectionError,
     ModelRequestError,
     ModelResponseError,
+    ModelTimeoutError,
     classify_provider_error,
 )
 from pleiad.models.openai.request import OpenAIRequest
@@ -88,6 +91,10 @@ class OpenAIProvider:
             create: Callable[..., Awaitable[object]] = self.client.chat.completions.create
             raw = await create(**payload)
             return parse_openai_response(raw)
+        except TimeoutException as error:
+            raise ModelTimeoutError() from error
+        except TransportError as error:
+            raise ModelConnectionError() from error
         except OpenAIError as error:
             raise classify_provider_error(error) from error
         except SystemFault:
@@ -123,6 +130,10 @@ class OpenAIProvider:
                 raise ModelResponseError(
                     "The Kimi stream ended without a finish reason.",
                 )
+        except TimeoutException as error:
+            raise ModelTimeoutError() from error
+        except TransportError as error:
+            raise ModelConnectionError() from error
         except OpenAIError as error:
             raise classify_provider_error(error) from error
         except SystemFault:
@@ -172,6 +183,10 @@ class AnthropicProvider:
             create: Callable[..., Awaitable[object]] = self.client.messages.create
             raw = await create(**payload)
             return parse_anthropic_response(raw)
+        except TimeoutException as error:
+            raise ModelTimeoutError() from error
+        except TransportError as error:
+            raise ModelConnectionError() from error
         except AnthropicError as error:
             raise classify_provider_error(error) from error
         except SystemFault:
@@ -206,6 +221,10 @@ class AnthropicProvider:
                 raise ModelResponseError(
                     "The Kimi stream ended without message_stop.",
                 )
+        except TimeoutException as error:
+            raise ModelTimeoutError() from error
+        except TransportError as error:
+            raise ModelConnectionError() from error
         except AnthropicError as error:
             raise classify_provider_error(error) from error
         except SystemFault:

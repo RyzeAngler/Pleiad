@@ -79,6 +79,7 @@ class WriteFileTool(BaseTool):
         """Write one workspace file using create or digest-checked replacement."""
         parsed = WriteFileArguments.model_validate(arguments)
         relative_path = normalize_relative_path(parsed.path, "workspace")
+        self.binding.validate_workspace_path(relative_path)
         try:
             data = parsed.content.encode("utf-8")
         except UnicodeEncodeError as error:

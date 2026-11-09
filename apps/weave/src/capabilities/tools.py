@@ -8,7 +8,8 @@ from pleiad.sandbox.policy import SandboxPolicy
 from pleiad.sandbox.sandbox import Sandbox
 from pleiad.schemas import validate_json_schema
 from pleiad.tools.base import BaseTool, ToolFailure, ToolOutput
-from pleiad.tools.builtins.command import command_output, decode_output
+from pleiad.tools.builtins.command import command_output, decode_output, workspace_mounts
+from pleiad.tools.builtins.file_support import FileToolBinding
 from pleiad.tools.contracts import ToolContext, ToolDescriptor
 from pleiad.tools.errors import ToolError
 from pleiad.tools.registry import ToolRegistry
@@ -32,16 +33,18 @@ class ScriptTool(BaseTool):
         self,
         descriptor: ToolDescriptor,
         binding: ToolBinding,
-        workspace: Path,
+        files: FileToolBinding,
         sandbox: Sandbox,
         sandbox_policy: SandboxPolicy,
+        source_root: Path,
     ) -> None:
         """Bind a manifest entry to the explicitly configured container policy."""
         self.tool_descriptor = descriptor
         self.binding = binding
-        self.workspace = workspace
+        self.files = files
         self.sandbox = sandbox
         self.sandbox_policy = sandbox_policy
+        self.source_root = source_root
 
     @property
     def descriptor(self) -> ToolDescriptor:
@@ -62,9 +65,12 @@ class ScriptTool(BaseTool):
         """Run the selected script without importing user code into the host."""
         result = await self.sandbox.execute(
             SandboxRequest(
-                argv=("python", f"/workspace/tools/{self.binding.script}"),
+                argv=("python", f"/tools/{self.binding.script}"),
                 cwd=PurePosixPath("/workspace"),
-                mounts=(SandboxMount(self.workspace, PurePosixPath("/workspace"), read_only=False),),
+                mounts=(
+                    *workspace_mounts(self.files, PurePosixPath("/workspace"), read_only=False),
+                    SandboxMount(source=self.source_root, target=PurePosixPath("/tools"), read_only=True),
+                ),
                 stdin=json.dumps(arguments, ensure_ascii=False).encode("utf-8"),
                 policy=self.sandbox_policy,
             )
@@ -93,9 +99,11 @@ class ScriptTool(BaseTool):
 def install_tools(
     registry: ToolRegistry,
     descriptors: tuple[ToolDescriptor, ...],
-    workspace: Path,
+    files: FileToolBinding,
     sandbox: Sandbox,
     policy: SandboxPolicy,
+    *,
+    source_root: Path,
 ) -> None:
     """Register validated script contracts while leaving their code in the container."""
     for descriptor in descriptors:
@@ -103,13 +111,13 @@ def install_tools(
             raise ValueError(f"Workspace Tool shadows a built-in: {descriptor.code}")
         if not descriptor.name.isidentifier():
             raise ValueError("Workspace Tool name must be a Python identifier")
-        path = workspace / "tools" / f"{descriptor.name}.json"
+        path = source_root / f"{descriptor.name}.json"
         binding = ToolBinding.model_validate_json(path.read_bytes())
-        script = workspace / "tools" / binding.script
+        script = source_root / binding.script
         relative = PurePosixPath(binding.script)
         if relative.is_absolute() or ".." in relative.parts or script.is_symlink():
             raise ValueError("Workspace Tool script must stay inside tools/")
-        if not script.is_file() or not script.resolve().is_relative_to((workspace / "tools").resolve()):
+        if not script.is_file() or not script.resolve().is_relative_to(source_root.resolve()):
             raise ValueError("Workspace Tool script is missing or outside tools/")
         compile(script.read_text(encoding="utf-8"), str(script), "exec")
         validate_json_schema(binding.input_schema)
@@ -117,6 +125,6 @@ def install_tools(
 
         def create(item: ToolDescriptor, selected: ToolBinding = binding) -> BaseTool:
             """Bind this validated script to a fresh SDK Tool instance."""
-            return ScriptTool(item, selected, workspace, sandbox, policy)
+            return ScriptTool(item, selected, files, sandbox, policy, source_root)
 
         registry.register(descriptor, create)

@@ -6,7 +6,7 @@ from pleiad.agent.errors import AgentConfigurationError
 from pleiad.agent.policy import AgentPolicyHints
 from pleiad.contracts import CapabilityGrants, JsonSchema, SkillRef, ToolRef, thaw_json_object
 from pleiad.models.openai.client import OpenAIModelClient
-from pleiad.runtime.config import RunConfig
+from pleiad.runtime.limits import RunLimits
 from pleiad.runtime.policy import HostPolicy, effective_policy
 
 
@@ -44,23 +44,29 @@ def test_agent_rejects_blank_name() -> None:
 
 
 def test_agent_rejects_duplicate_tool_refs() -> None:
-    """Repeated explicit Tool references fail before default merging."""
+    """Repeated explicit Tool references fail before execution."""
     with pytest.raises(AgentConfigurationError, match="Tool refs must be unique"):
         agent(tools=(ToolRef("custom"), ToolRef("custom")))
 
 
-def test_default_tools_are_exposed_once() -> None:
-    """Default Tools precede one explicit default and one custom Tool."""
-    configured = agent(tools=(ToolRef("write_file"), ToolRef("custom")))
+def test_agent_installs_default_tools_when_selection_is_omitted() -> None:
+    configured = Agent(name="default", model=ModelStub(), prompt="Answer the user.")
 
-    assert tuple(ref.code for ref in configured.tools) == ("read_file", "write_file", "command", "custom")
+    assert tuple(ref.code for ref in configured.tools) == ("read_file", "write_file", "command")
+
+
+@pytest.mark.parametrize("codes", [(), ("read_file",), ("write_file", "custom")])
+def test_explicit_agent_tools_are_the_exact_host_selected_set(codes: tuple[str, ...]) -> None:
+    configured = agent(tools=tuple(ToolRef(code) for code in codes))
+
+    assert tuple(ref.code for ref in configured.tools) == codes
 
 
 def test_empty_agent_grants_do_not_enable_tools() -> None:
     """An explicitly empty Agent grant set remains empty after policy intersection."""
     hints = AgentPolicyHints(grants=CapabilityGrants(capabilities=frozenset()))
     policy = effective_policy(
-        RunConfig(grants=CapabilityGrants(capabilities=frozenset({"file.read"}))),
+        RunLimits(grants=CapabilityGrants(capabilities=frozenset({"file.read"}))),
         HostPolicy(grants=CapabilityGrants(capabilities=frozenset({"file.read"}))),
         agent_hints=hints,
     )
@@ -81,7 +87,7 @@ def test_policy_hints_preserve_none_grants() -> None:
     [
         ("timeout_seconds", 0.0),
         ("timeout_seconds", float("inf")),
-        ("max_turns", 0),
+        ("max_model_steps", 0),
         ("max_output_tokens", 0),
     ],
 )

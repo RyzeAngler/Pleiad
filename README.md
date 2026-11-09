@@ -1,6 +1,6 @@
 # Pleiad（昴）
 
-Pleiad 是一个用于构建和运行 Agent 的框架；Pleiad Weave 是基于它提供的官方 Agent 应用。
+Pleiad 是一个用于构建和运行 Agent 的框架；Pleiad Weave 是基于它提供的官方 Agent 应用，以 Web 工作区为主要交互入口。
 
 名称取自昴星团。昴星团中的恒星彼此独立，又共同组成一个清晰可辨的星群；Pleiad 中的工具、技能和动态任务节点也以同样的方式协作。
 
@@ -8,7 +8,27 @@ Pleiad 是一个用于构建和运行 Agent 的框架；Pleiad Weave 是基于�
 >
 > 本项目按照 [MIT License](LICENSE) 发布，允许个人、组织和商业项目自由使用、修改、分发和再许可。分发本项目或其重要组成部分时，请保留版权声明和许可证文本。
 
-![TUI 界面](docs/assets/tui.png)
+## Web 工作区
+
+在同一个主聊天中提出目标、补充要求和接收结果，打开工作区查看执行过程、产物与资源。以下截图使用本地演示数据展示当前 Web 界面。
+
+### 主聊天
+
+聊天入口显示独立聊天页；进入工作区后，同一份消息历史和草稿保留在左侧。
+
+![Weave 主聊天与紧凑输入框](docs/assets/weave-web-chat.png)
+
+### 执行过程
+
+最新步骤排在最上面，展开步骤查看实际动作与结果；补充工作通过主聊天提交。
+
+![Weave 工作详情与倒序执行时间线](docs/assets/weave-web-process.png)
+
+### 资源详情
+
+模型、工具、技能和环境均可查看完整信息；敏感凭据在服务端脱敏后展示和复制。
+
+![Weave 资源目录与脱敏详情](docs/assets/weave-web-resources.png)
 
 ## 核心思想
 
@@ -23,7 +43,7 @@ Pleiad 保持最小的智能体模型：
 - 工具是执行动作、访问外部系统和获取事实的统一入口；不受信任的工作区工具通过 OCI 沙箱执行。
 - 技能提供静态知识、方法和工作规范，正文按需读取；Skill 脚本通过已授权的 command 在沙箱中执行。
 
-Pleiad 为 Agent 自动加入 `read_file`、`write_file` 和 `command` 引用，由宿主绑定和授权。Weave 的工作区工具和技能根据节点声明的能力代码选择；工作区 Python、Bash 和 Skill 脚本交给显式配置的 OCI Sandbox 执行。
+Agent 未指定工具时默认使用 `read_file`、`write_file` 和 `command` 引用，显式工具声明精确限定可用集合，所有工具由宿主绑定和授权。Weave 的工作区工具和技能根据节点声明的能力代码选择；工作区 Python、Bash 和 Skill 脚本交给显式配置的 OCI Sandbox 执行。
 
 使用者维护工作区能力，Weave 的 Agent 提出并提交任务图，Pleiad 校验图结构、调度节点并检查结果契约。
 
@@ -51,7 +71,7 @@ flowchart LR
 - 统一错误模型和终止性错误判断；
 - 顺序产品事件、程序日志和显式 OpenTelemetry 接入；
 - 命令行、终端界面、网页工作区和 HTTP 接口；
-- 可复用空间、独立任务会话、对话驱动的 Graph 与执行可视化；
+- 可复用空间、独立 Worker Execution、单主聊天与 Graph 执行可视化；
 - 节点输入、输出和最终结果的结构校验。
 
 Pleiad 框架本身不依赖 TUI、FastAPI、Typer、Uvicorn、Loguru 或具体应用配置。第三方可以只安装 `pleiad`，使用公开 Runner、Tool、Skill、Graph 和 Sandbox 契约开发自己的应用。
@@ -86,19 +106,7 @@ PLEIAD_LLM_API_KEY=your-api-key
 
 工作区工具和 Skill 脚本需要本地已存在的 OCI 镜像。`PLEIAD_SANDBOX_IMAGE` 必须填写真实的 `name@sha256:<64 位十六进制 digest>`；SDK 对所有环境都要求固定 digest，不允许宿主执行回退。
 
-启动终端界面：
-
-```bash
-uv run --project apps/weave --frozen pleiad tui
-```
-
-执行单个目标：
-
-```bash
-uv run --project apps/weave --frozen pleiad run "读取工作区中的资料并生成摘要"
-```
-
-启动网页与 HTTP 服务：
+构建并启动 Web 工作区：
 
 ```bash
 npm --prefix apps/weave/web ci
@@ -106,22 +114,27 @@ npm --prefix apps/weave/web run build
 uv run --project apps/weave --frozen pleiad serve
 ```
 
-浏览器打开 **http://127.0.0.1:8000/**。完整的配置、沙箱准备、页面操作、前端开发与故障处理见 [Weave 网页版启动与操作](docs/weave-web.md)。网页与 API 复用同一个 ExecutionService，不能同时启动另一个拥有相同工作区的 TUI 或服务。
+浏览器打开 **http://127.0.0.1:8000/**。HTTP 服务持有工作区拥有者锁，CLI、TUI 与网页连接同一拥有者。完整配置与操作见 [Weave 网页版启动与操作](docs/weave-web.md)。
 
-默认监听 `127.0.0.1:8000`，当前是没有多用户鉴权的本地单所有者部署。接口包括：
+需要从终端提交目标或查看工作时，在另一个终端连接已经运行的服务：
 
-- `GET /healthz`
-- `POST /v1/executions`
-- `GET /v1/executions/{execution_id}`
-- `POST /v1/executions/{execution_id}/cancel`
-- `GET /v1/executions/{execution_id}/events`
-- `GET /v1/executions/{execution_id}/stream`
-- `GET /v1/executions/{execution_id}/details`
-- `GET/POST /v1/spaces`
-- `GET/POST /v1/spaces/{space_id}/conversations`
-- `GET /v1/resources`
+```bash
+uv run --project apps/weave --frozen pleiad run "读取工作区中的资料并生成摘要"
+uv run --project apps/weave --frozen pleiad tui
+```
 
-事件回放支持 `?after_sequence=<integer>`，只返回序号更大的持久化事件。事件先写入 SQLite journal，再分发给在线监听者；模型文本增量只在线分发，不写入 journal，思维增量不进入事件流。单条持久化事件的序列化大小上限为 16 KiB。
+默认监听 `127.0.0.1:8000`，浏览器写请求校验 Host、Origin 与 `X-Weave-CSRF`。主要接口包括以下入口。
+
+- `GET /healthz` 与 `GET /readyz`
+- `GET /v1/snapshot` 与 `GET /v1/events?after_sequence=...`
+- `GET/POST /v1/chat/messages`
+- `GET /v1/spaces` 与 `GET/PATCH/DELETE /v1/spaces/{space_id}`
+- `GET /v1/executions` 与 `GET /v1/executions/{execution_id}`
+- `POST /v1/executions/{execution_id}/pause`、`/resume`、`/cancel`、`/retry`
+- `GET /v1/attentions` 与 `POST /v1/attentions/{attention_id}/resolve`
+- 附件、产物、GraphRun、节点尝试、SDK Run 和工具原文的有界读取
+
+正式消息和产品事件由同一 SQLite 事务提交，全局事件序号支持重连回放。快照返回一致读取水位，客户端废弃旧读取代次。断开订阅后，Worker 继续由服务拥有。接口与读取契约见 [Web HTTP 契约](docs/weave-web.md#http-契约)。
 
 ## 能力配置
 
@@ -144,7 +157,7 @@ SDK 自动提供 `read_file`、`write_file` 和 `command`。能力搜索复用 S
 
 ### 开发自定义 Tool
 
-能力组合的设计理念见 [Weave 架构设计](docs/weave-architecture.md#1-核心设计理念)。仓库提供 [text_statistics 脚本](workspace/tools/text_statistics.py) 和 [JSON 绑定](workspace/tools/text_statistics.json) 示例；也可让 Weave 使用 `tool-development` Skill 编写、校验和发布新能力。
+能力组合的设计理念见 [Weave 架构设计](docs/weave-architecture.md#1-核心设计理念)。仓库提供 [text_statistics 脚本](workspace/tools/text_statistics.py) 和 [JSON 绑定](workspace/tools/text_statistics.json) 示例；也可让 Weave 使用 `tool-development` Skill 生成能力源码与绑定，由宿主审阅后放入能力目录。
 
 ### 任务图设计
 
@@ -152,26 +165,24 @@ SDK 自动提供 `read_file`、`write_file` 和 `command`。能力搜索复用 S
 
 ## 运行数据
 
-本地运行数据写入 `workspace/runtime/`：
+新格式数据写入 `workspace/runtime-v2/`，版本不匹配的数据库会明确拒绝打开。工作文件按 Space 和 Execution 分目录管理。
 
 ```text
-runtime/
-├── logs/          按大小轮转的程序日志（默认 30 MiB，7 份备份）
-├── executions/    执行摘要
-├── graphs/        任务图版本
-├── graph-runs/    任务图运行记录
-├── node-runs/     节点运行记录
-├── artifacts/     节点结构化产物
-├── scratch/       命令与 Skill 的临时产物
-├── workspaces/    空间与独立任务会话元数据
-└── memory/        SDK ShortMemory SQLite 与产品授权事实 JSONL
+workspace/
+├── runtime-v2/
+│   ├── product.sqlite3     产品记录、责任处置、路由回执与全局事件
+│   ├── sessions.sqlite3    SDK Session、输入、Run、ModelStep 与检查点
+│   ├── content/            摘要寻址的附件与产物内容
+│   ├── facts/              显式授权的 Space 与用户事实
+│   └── logs/               按大小轮转的诊断日志
+└── work/<space_id>/<execution_id>/   单个 Worker 的任务文件
 ```
 
-### 上下文与记忆
+Router 使用短只读 Run，固定输入批次与原子路由提交。每个 Worker Execution 拥有独立 Session，可在执行边界接受实时补充。SDK 输入消费与产品责任结算分别记录，正式结果经 Report 验证后唤醒 Router。
 
-主 Agent 使用 SDK SQLite ShortMemory 保存完整 Turn，Node Agent 使用 SDK 的单次节点记忆。同一会话的 Execution 串行执行；业务输入通过请求专用 ContextBlock 提供，不改写原始 User message。会话/用户事实的授权和存储属于 Weave。OpenTelemetry spans 由显式配置的 exporter 导出，不保存到第二套本地 TraceStore。
+RunHandle 持有活跃执行，暂停保存 RunCheckpoint，继续沿原 run_id 恢复。独立子工作创建 child Execution，互斥预算预留由产品账本结算。Handoff 保留原 Run、Execution 和 Session。日志与 OpenTelemetry 诊断保持独立身份。
 
-历史与上下文的设计理念见 [Pleiad 架构设计](docs/pleiad-architecture.md#1-核心设计理念)；执行身份与记忆的关系见 [Weave 架构设计](docs/weave-architecture.md#执行身份与记忆)。对应环境变量见 `.env.example`，由应用配置校验。
+运行和恢复机制见 [Pleiad 架构](docs/pleiad-architecture.md) 与 [Weave 架构](docs/weave-architecture.md)。
 
 ## 项目结构
 
@@ -185,15 +196,15 @@ packages/pleiad/src/  # 安装后的 Python 包名：pleiad
 ├── messages/        完整消息与 ToolCall
 ├── events/          执行、消息、图和 Worker 事件
 ├── context/         上下文预算、选择、渲染和压缩
-├── memory/          ShortMemory、Turn、内存和 SQLite 后端
-├── orchestration/   Graph、Handoff 和 Supervisor
+├── sessions/        输入、Run、ModelStep、检查点与双存储后端
+├── orchestration/   Graph、Handoff 和作用域 SubagentGroup
 ├── sandbox/         Sandbox backend 契约与 OCI 参考实现
 ├── observability/   通用 Trace/Span/事件端口
 ├── logging/         日志上下文、过滤器和轮转 handler 构建
 └── errors/          稳定错误码和基础异常
 
 apps/weave/src/      # 安装后的 Python 包名：pleiad_weave
-├── agent/           官方 Weave Agent 和 Node runner
+├── agent/           Router、Worker、GraphControls 和 Node runner
 ├── application/     API/TUI/CLI 共用的应用服务和 DTO
 ├── capabilities/    workspace catalog、热加载和快照
 ├── infrastructure/  配置、provider、存储、日志和沙箱准备

@@ -24,7 +24,7 @@ class HandoffRecord(ContractModel):
 
 
 class HandoffState(ContractModel):
-    """Serializable Handoff history independent from ShortMemory messages."""
+    """Serializable Handoff history independent from Session messages."""
 
     records: tuple[HandoffRecord, ...] = ()
     count: int = Field(default=0, ge=0)

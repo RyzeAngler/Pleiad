@@ -78,6 +78,8 @@ class ReadFileTool(BaseTool):
         """Read one line-bounded UTF-8 file from a bound relative scope."""
         parsed = ReadFileArguments.model_validate(arguments)
         relative_path = normalize_relative_path(parsed.path, parsed.scope)
+        if parsed.scope == "workspace":
+            self.binding.validate_workspace_path(relative_path)
         root = read_scope_root(
             self.binding,
             parsed.scope,

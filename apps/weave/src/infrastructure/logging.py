@@ -57,7 +57,10 @@ def configure_logging(config: LoggingConfig) -> None:
         )
     if config.console:
         sinks.append(logging.StreamHandler())
-    formatter = SafeLogFormatter("%(asctime)s %(levelname)s %(name)s execution=%(execution_id)s %(message)s")
+    formatter = SafeLogFormatter(
+        "%(asctime)s %(levelname)s %(name)s execution=%(execution_id)s session=%(session_id)s "
+        "run=%(run_id)s step=%(step_id)s call=%(call_id)s %(message)s"
+    )
     for sink in sinks:
         sink.setFormatter(formatter)
         sink.addFilter(ContextFilter())

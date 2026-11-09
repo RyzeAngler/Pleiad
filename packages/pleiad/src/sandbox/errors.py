@@ -1,6 +1,16 @@
+import asyncio
 from enum import StrEnum
 
 from pleiad.errors.base import SystemFault
+
+
+class SandboxCancelledError(asyncio.CancelledError):
+    """Preserve cancellation with the concrete container cleanup result."""
+
+    def __init__(self, *, confirmed_stop: bool) -> None:
+        """Retain whether the backend confirmed that its owned container stopped."""
+        super().__init__("The Sandbox execution was cancelled")
+        self.confirmed_stop = confirmed_stop
 
 
 class SandboxErrorCode(StrEnum):

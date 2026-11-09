@@ -28,7 +28,7 @@ Preserve these identity rules:
 - A Pleiad Run is an SDK invocation, not another durable job.
 - A Handoff remains within the same Run, Execution, and Session.
 - A Worker with an independent lifecycle creates a child Execution with `parent_execution_id`.
-- Message order, Turn order, tool-call/result pairing, Execution state, Graph state, and Trace state are separate facts and must not be collapsed.
+- Message order, ModelStep order, tool-call/result pairing, Execution state, Graph state, and Trace state are separate facts and must not be collapsed.
 
 See `docs/pleiad-architecture.md` for the reusable runtime design and `docs/weave-architecture.md` for product composition, persistence, and interfaces.
 

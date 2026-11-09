@@ -1,10 +1,10 @@
+from pleiad.budgets import BudgetLedger
 from pleiad.contracts import JsonObject, JsonSchema
-from pleiad.tools.base import BaseTool, ToolOutput
+from pleiad.tools.base import BackgroundAdmission, BaseTool, ToolOutput, ToolScope
 from pleiad.tools.builtins.read_file import ReadFileTool
-from pleiad.tools.contracts import ToolCall, ToolContext, ToolDescriptor, ToolPolicy
+from pleiad.tools.contracts import ToolContext, ToolDescriptor, ToolPolicy
 from pleiad.tools.interruption import InterruptionResponse, ToolExecutionOutcome, ToolInterruption
 from pleiad.tools.registry import ToolRegistry
-from pleiad.tools.runtime import ToolRuntime
 
 
 class RequiresApprovalTool(BaseTool):
@@ -13,7 +13,6 @@ class RequiresApprovalTool(BaseTool):
     def __init__(self, tool: BaseTool) -> None:
         """Retain the real implementation and reuse SDK execution validation."""
         self.tool = tool
-        self.execution_runtime = ToolRuntime()
 
     @property
     def descriptor(self) -> ToolDescriptor:
@@ -35,8 +34,23 @@ class RequiresApprovalTool(BaseTool):
         """Retain the underlying permission checks before and after approval."""
         return self.tool.required_permissions
 
-    async def execute(self, context: ToolContext, arguments: JsonObject) -> ToolOutput:
-        """Request approval before invoking the implementation."""
+    @property
+    def budget_ledger(self) -> BudgetLedger | None:
+        """Preserve the actual scoped budget owner across the approval boundary."""
+        return self.tool.budget_ledger
+
+    @property
+    def execution_scope(self) -> ToolScope | None:
+        """Retain child resource lifecycle ownership while approvals remain pending."""
+        return self.tool.execution_scope
+
+    @property
+    def supports_background(self) -> bool:
+        """Preserve the implementation's concrete backend admission capability."""
+        return self.tool.supports_background
+
+    async def authorize(self, context: ToolContext, arguments: JsonObject) -> ToolInterruption:
+        """Request host authorization before runtime action or backend admission."""
         return ToolInterruption(
             call_id=context.call_id,
             tool_code=self.descriptor.code,
@@ -46,17 +60,21 @@ class RequiresApprovalTool(BaseTool):
             details={"kind": "weave.approval"},
         )
 
+    async def execute(self, context: ToolContext, arguments: JsonObject) -> ToolOutput:
+        """Execute the original implementation after the SDK authorizes this action."""
+        return await self.tool.execute(context, arguments)
+
+    async def execute_background(
+        self, context: ToolContext, arguments: JsonObject, admission: BackgroundAdmission
+    ) -> ToolOutput:
+        """Retain actual backend acceptance under the same SDK operation identity."""
+        return await self.tool.execute_background(context, arguments, admission)
+
     async def resume_interruption(
         self, context: ToolContext, interruption: ToolInterruption, response: InterruptionResponse
     ) -> ToolExecutionOutcome:
-        """Execute an approved action once or return its server-authored denial."""
-        if not response.result.ok:
-            return response.result
-        return await self.execution_runtime.execute(
-            self.tool,
-            ToolCall(call_id=context.call_id, tool_code=self.descriptor.code, arguments=interruption.arguments),
-            context,
-        )
+        """Delegate native execution interruptions after SDK-owned authorization."""
+        return await self.tool.resume_interruption(context, interruption, response)
 
 
 class RequiresApprovalReadFileTool(RequiresApprovalTool, ReadFileTool):

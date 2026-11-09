@@ -49,44 +49,32 @@ class RunCancelledEvent(RuntimeEvent):
     kind: Literal["run.cancelled"] = "run.cancelled"
 
 
-class RunInterruptedEvent(RuntimeEvent):
+class RunPausedEvent(RuntimeEvent):
     """Report a paused Run and its pending interruption identities."""
 
-    kind: Literal["run.interrupted"] = "run.interrupted"
-    interruption_ids: tuple[str, ...] = Field(min_length=1)
+    kind: Literal["run.paused"] = "run.paused"
+    interruption_ids: tuple[str, ...] = ()
 
 
-class RunTimedOutEvent(RuntimeEvent):
-    """Report that a Run exhausted its deadline."""
+class ModelStepEvent(AgentRuntimeEvent):
+    """Correlate a Runtime event with one Session ModelStep."""
 
-    kind: Literal["run.timed_out"] = "run.timed_out"
-
-
-class RunLimitReachedEvent(RuntimeEvent):
-    """Report that a Run exhausted a configured execution limit."""
-
-    kind: Literal["run.limit_reached"] = "run.limit_reached"
+    step_id: str = Field(min_length=1)
 
 
-class TurnEvent(AgentRuntimeEvent):
-    """Correlate a Runtime event with one Memory Turn."""
+class ModelStepStartedEvent(ModelStepEvent):
+    """Report creation of an active Session ModelStep."""
 
-    turn_id: str = Field(min_length=1)
-
-
-class TurnStartedEvent(TurnEvent):
-    """Report creation of an active Memory Turn."""
-
-    kind: Literal["turn.started"] = "turn.started"
+    kind: Literal["step.started"] = "step.started"
 
 
-class TurnCompletedEvent(TurnEvent):
-    """Report durable acceptance of a complete Memory Turn."""
+class ModelStepCompletedEvent(ModelStepEvent):
+    """Report durable acceptance of a complete Session ModelStep."""
 
-    kind: Literal["turn.completed"] = "turn.completed"
+    kind: Literal["step.completed"] = "step.completed"
 
 
-class ModelStartedEvent(TurnEvent):
+class ModelStartedEvent(ModelStepEvent):
     """Report the start of one real model attempt."""
 
     kind: Literal["model.started"] = "model.started"
@@ -95,7 +83,7 @@ class ModelStartedEvent(TurnEvent):
     message_count: int = Field(ge=0)
 
 
-class ModelCompletedEvent(TurnEvent):
+class ModelCompletedEvent(ModelStepEvent):
     """Report completion metadata for one real model attempt."""
 
     kind: Literal["model.completed"] = "model.completed"
@@ -106,7 +94,7 @@ class ModelCompletedEvent(TurnEvent):
     output_tokens: int | None = Field(default=None, ge=0)
 
 
-class ModelFailedEvent(TurnEvent):
+class ModelFailedEvent(ModelStepEvent):
     """Report failure of one real model attempt."""
 
     kind: Literal["model.failed"] = "model.failed"
@@ -118,7 +106,7 @@ class ModelFailedEvent(TurnEvent):
 class ToolEvent(RuntimeEvent):
     """Correlate Tool execution with its declaring Assistant message."""
 
-    turn_id: str = Field(min_length=1)
+    step_id: str = Field(min_length=1)
     assistant_message_id: str = Field(min_length=1)
     call_id: str = Field(min_length=1)
     tool_code: str = Field(min_length=1)

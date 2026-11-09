@@ -1,36 +1,33 @@
-"""Typer CLI entrypoint for the Application Service."""
-
 import asyncio
-from pathlib import Path
 from typing import Annotated, Literal
+from uuid import uuid4
 
+import httpx
 import typer
 import uvicorn
-from pleiad.contracts import JsonObject
-from pleiad.errors.base import SystemFault
-from pydantic import ConfigDict, TypeAdapter, ValidationError
+from pydantic import ValidationError
 
 from pleiad_weave.api.app import create_app
-from pleiad_weave.application.dto import ApprovalRequest, ExecuteRequest
-from pleiad_weave.application.errors import ApprovalConflictError
+from pleiad_weave.application.client import WeaveClient, display_json, execution_record
 from pleiad_weave.capabilities.mcp import create_mcp_server, load_mcp_configuration
 from pleiad_weave.infrastructure.bootstrap import create_application
-from pleiad_weave.infrastructure.config import MemorySettings, Settings
-from pleiad_weave.infrastructure.storage.models import ExecutionStatus
-from pleiad_weave.infrastructure.storage.repository import ExecutionRepository
+from pleiad_weave.infrastructure.config import MemorySettings
+from pleiad_weave.infrastructure.storage.product_models import ChatMessageRequest, ResolutionRequest
 from pleiad_weave.memory_cli import memory_app
 from pleiad_weave.tui.app import PleiadApp
 
-app = typer.Typer(add_completion=False, help="Pleiad Weave dynamic Agent runtime")
-approval_app = typer.Typer(help="Inspect and decide persisted Tool approval requests")
-app.add_typer(approval_app, name="approval")
+app = typer.Typer(add_completion=False, help="Weave permanent chat and workspace controls")
+attention_app = typer.Typer(help="Read and answer the running owner's persistent requests")
+execution_app = typer.Typer(help="Inspect and control work owned by the running service")
+app.add_typer(attention_app, name="attention")
+app.add_typer(execution_app, name="execution")
 app.add_typer(memory_app, name="memory")
-JSON_OBJECT_ADAPTER = TypeAdapter[JsonObject](JsonObject, config=ConfigDict(strict=True, allow_inf_nan=False))
+DEFAULT_SERVER = "http://127.0.0.1:8000"
 
 
 @app.command("mcp-login")
 def mcp_login(server_code: str) -> None:
-    """Authorize one configured MCP server without starting the model or sandbox."""
+    """Authorize one explicitly selected MCP connection."""
     settings = MemorySettings()
     configuration = load_mcp_configuration(settings.workspace)
     connection = next((item for item in configuration.servers if item.code == server_code), None)
@@ -39,7 +36,6 @@ def mcp_login(server_code: str) -> None:
     server = create_mcp_server(connection, settings.workspace, interactive=True)
 
     async def login() -> None:
-        """Complete consent and check tool discovery without executing actions."""
         async with server.client as client:
             tools = await client.list_tools()
         typer.echo(f"MCP connection ready: {server_code} ({len(tools)} tools)")
@@ -49,120 +45,162 @@ def mcp_login(server_code: str) -> None:
 
 @app.command()
 def run(
-    objective: str = typer.Argument(..., help="要完成的目标"),
-    input_json: str = typer.Option("{}", "--input", help="JSON 格式的业务输入"),
+    text: Annotated[str, typer.Argument(help="Message for the permanent main chat")],
+    server: Annotated[str, typer.Option("--server", envvar="PLEIAD_SERVER_URL")] = DEFAULT_SERVER,
+    message_id: Annotated[str | None, typer.Option("--message-id")] = None,
+    executions: Annotated[list[str] | None, typer.Option("--execution")] = None,
+    wait: Annotated[bool, typer.Option("--wait/--no-wait")] = True,
+    timeout: Annotated[float, typer.Option("--timeout", min=1)] = 300.0,
 ) -> None:
-    """Submit one objective to the Weave Agent."""
+    """Submit one chat message and observe its committed Router reply."""
     try:
-        request = ExecuteRequest(objective=objective, input=JSON_OBJECT_ADAPTER.validate_json(input_json))
+        request = ChatMessageRequest(
+            client_message_id=str(uuid4()) if message_id is None else message_id,
+            text=text,
+            target_execution_ids=() if executions is None else tuple(executions),
+        )
     except ValidationError as error:
-        raise typer.BadParameter("Input must be a valid JSON object and the objective must not be empty") from error
-    service = create_application()
+        raise typer.BadParameter(str(error)) from error
 
-    async def execute() -> None:
-        try:
-            await service.start()
-            queued = await service.submit(request)
-            record = await service.wait(queued.execution_id)
-            if record is None:
-                raise RuntimeError("Execution disappeared before completion")
-            typer.echo(record.model_dump_json(indent=2))
-        finally:
-            await service.shutdown()
+    async def send() -> None:
+        async with WeaveClient(server) as client:
+            initial = await client.snapshot()
+            receipt = await client.submit(request)
+            if not wait:
+                typer.echo(receipt.model_dump_json(indent=2))
+                return
+            async with asyncio.timeout(timeout):
+                reply = await client.wait_for_reply(receipt, after_sequence=initial.snapshot_sequence)
+            typer.echo(reply.body)
+            for execution_id in reply.target_execution_ids:
+                record = execution_record(await client.execution(execution_id))
+                typer.echo(f"{record.execution_id}  {record.status.value}  {record.objective}")
 
     try:
-        asyncio.run(execute())
-    except SystemFault as error:
-        if error.code != "weave.workspace_in_use":
-            raise
-        typer.echo(error.message, err=True)
+        asyncio.run(send())
+    except (httpx.HTTPError, TimeoutError, ValueError) as error:
+        typer.echo(f"Message request {request.client_message_id} failed: {error}", err=True)
         raise typer.Exit(code=1) from error
 
 
 @app.command()
 def serve(
-    host: str = typer.Option("127.0.0.1", "--host"),
-    port: int = typer.Option(8000, "--port"),
+    host: Annotated[str, typer.Option("--host")] = "127.0.0.1",
+    port: Annotated[int, typer.Option("--port", min=1, max=65535)] = 8000,
 ) -> None:
-    """Start the Web workspace and HTTP API on one local service."""
-    service = create_application()
-    uvicorn.run(create_app(service), host=host, port=port)
+    """Start the workspace's single execution owner and browser interface."""
+    uvicorn.run(create_app(create_application()), host=host, port=port)
 
 
 @app.command()
-def tui() -> None:
-    """Start the interactive terminal workbench."""
-    PleiadApp(create_application(Settings(log_console=False))).run()
-
-
-@approval_app.command("list")
-def list_approvals(
-    execution_id: Annotated[str | None, typer.Option("--execution-id")] = None,
-    workspace: Annotated[Path | None, typer.Option("--workspace")] = None,
+def tui(
+    server: Annotated[str, typer.Option("--server", envvar="PLEIAD_SERVER_URL")] = DEFAULT_SERVER,
 ) -> None:
-    """List the exact pending actions, including requests retained after restart."""
-    settings = MemorySettings() if workspace is None else MemorySettings(workspace=workspace)
-    root = settings.runtime_root / "executions"
-    if not (root / "execution-journal.sqlite3").is_file():
-        if execution_id is not None:
-            raise typer.BadParameter(f"Execution not found: {execution_id}")
-        typer.echo("[]")
-        return
-    repository = ExecutionRepository(root)
-    if execution_id is None:
-        records = repository.list_nonterminal()
-    else:
-        record = repository.get(execution_id)
-        if record is None:
-            raise typer.BadParameter(f"Execution not found: {execution_id}")
-        records = (record,)
-    pending: list[ApprovalRequest] = []
-    for record in records:
-        if record.status is not ExecutionStatus.WAITING_APPROVAL:
-            continue
-        state = repository.resume_state(record.execution_id)
-        if state is None:
-            raise ApprovalConflictError("The waiting Execution recovery state is missing.")
-        decided = {item.interruption_id for item in state.decisions}
-        pending.extend(
-            ApprovalRequest(execution_id=record.execution_id, interruption=item, deadline=state.checkpoint.deadline)
-            for item in state.checkpoint.interruptions
-            if item.interruption_id not in decided
+    """Connect a terminal interface to the existing workspace owner."""
+    PleiadApp(WeaveClient(server)).run()
+
+
+@attention_app.command("list")
+def list_attentions(
+    server: Annotated[str, typer.Option("--server", envvar="PLEIAD_SERVER_URL")] = DEFAULT_SERVER,
+) -> None:
+    """List current user requests from the shared product journal."""
+
+    async def read() -> None:
+        async with WeaveClient(server) as client:
+            typer.echo(display_json(await client.get("/v1/attentions", params={"status": "pending"})))
+
+    asyncio.run(read())
+
+
+@attention_app.command("answer")
+def answer_attention(
+    attention_id: str,
+    answer: str,
+    server: Annotated[str, typer.Option("--server", envvar="PLEIAD_SERVER_URL")] = DEFAULT_SERVER,
+) -> None:
+    """Answer the inspected question and commit its main-chat message once."""
+    asyncio.run(resolve_attention(server, attention_id, answer=answer))
+
+
+@attention_app.command("approve")
+def approve_attention(
+    attention_id: str,
+    server: Annotated[str, typer.Option("--server", envvar="PLEIAD_SERVER_URL")] = DEFAULT_SERVER,
+) -> None:
+    """Approve the current exact host action bound to this request."""
+    asyncio.run(resolve_attention(server, attention_id, decision="approve"))
+
+
+@attention_app.command("reject")
+def reject_attention(
+    attention_id: str,
+    server: Annotated[str, typer.Option("--server", envvar="PLEIAD_SERVER_URL")] = DEFAULT_SERVER,
+) -> None:
+    """Reject the current exact host action bound to this request."""
+    asyncio.run(resolve_attention(server, attention_id, decision="reject"))
+
+
+async def resolve_attention(
+    server: str,
+    attention_id: str,
+    *,
+    answer: str | None = None,
+    decision: Literal["approve", "reject"] | None = None,
+) -> None:
+    """Read the latest request and submit its revision and action digest."""
+    async with WeaveClient(server) as client:
+        current = await client.attention(attention_id)
+        request = ResolutionRequest(
+            request_id=str(uuid4()),
+            expected_revision=current.revision,
+            answer=answer,
+            decision=decision,
+            action_digest=current.action_digest,
         )
-    typer.echo("[" + ",".join(item.model_dump_json() for item in pending) + "]")
+        result = await client.resolve(attention_id, request)
+        typer.echo(result.model_dump_json(indent=2))
 
 
-@approval_app.command("approve")
-def approve(execution_id: str, interruption_id: str) -> None:
-    """Approve one exact persisted action and wait for its resumed outcome."""
-    decide_approval(execution_id, interruption_id, "approve")
+@execution_app.command("list")
+def list_executions(
+    server: Annotated[str, typer.Option("--server", envvar="PLEIAD_SERVER_URL")] = DEFAULT_SERVER,
+) -> None:
+    """List the running owner's durable work records."""
+
+    async def read() -> None:
+        async with WeaveClient(server) as client:
+            typer.echo(display_json(await client.get("/v1/executions")))
+
+    asyncio.run(read())
 
 
-@approval_app.command("reject")
-def reject(execution_id: str, interruption_id: str) -> None:
-    """Reject one exact persisted action and wait for the Agent to continue."""
-    decide_approval(execution_id, interruption_id, "reject")
+@execution_app.command("show")
+def show_execution(
+    execution_id: str,
+    server: Annotated[str, typer.Option("--server", envvar="PLEIAD_SERVER_URL")] = DEFAULT_SERVER,
+) -> None:
+    """Read current work details, reports, children, and artifacts."""
+
+    async def read() -> None:
+        async with WeaveClient(server) as client:
+            typer.echo(display_json(await client.execution(execution_id)))
+
+    asyncio.run(read())
 
 
-def decide_approval(execution_id: str, interruption_id: str, decision: Literal["approve", "reject"]) -> None:
-    """Submit a decision through the shared service without inventing a Tool result."""
-    service = create_application()
+@execution_app.command("control")
+def control_execution(
+    execution_id: str,
+    action: Literal["pause", "resume", "cancel"],
+    server: Annotated[str, typer.Option("--server", envvar="PLEIAD_SERVER_URL")] = DEFAULT_SERVER,
+) -> None:
+    """Submit a revision-checked pause, resume, or cancellation request."""
 
-    async def execute() -> None:
-        try:
-            await service.start()
-            await service.decide(execution_id, interruption_id, decision)
-            record = await service.wait(execution_id)
-            if record is None:
-                raise LookupError(f"Execution disappeared after its approval decision: {execution_id}")
-            typer.echo(record.model_dump_json(indent=2))
-        finally:
-            await service.shutdown()
+    async def control() -> None:
+        async with WeaveClient(server) as client:
+            record = execution_record(await client.execution(execution_id))
+            result = await client.control(record, action)
+            typer.echo(result.model_dump_json(indent=2))
 
-    try:
-        asyncio.run(execute())
-    except SystemFault as error:
-        if error.code != "weave.workspace_in_use":
-            raise
-        typer.echo(error.message, err=True)
-        raise typer.Exit(code=1) from error
+    asyncio.run(control())

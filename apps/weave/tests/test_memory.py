@@ -7,22 +7,22 @@ import pytest
 from pydantic import TypeAdapter
 from typer.testing import CliRunner
 
-from pleiad_weave.infrastructure.storage.memory import MemoryConflictError, MemoryFact, MemoryStore
+from pleiad_weave.infrastructure.storage.memory import FactStore, MemoryConflictError, MemoryFact
 from pleiad_weave.memory_cli import memory_app
 
 
 @pytest.fixture
-def memory(tmp_path: Path) -> MemoryStore:
-    store = MemoryStore(tmp_path / "workspace" / "runtime" / "memory", user_id="alice")
-    store.save_fact(MemoryFact(memory_id="preference", scope="conversation", scope_id="one", content="favorite tea"))
+def memory(tmp_path: Path) -> FactStore:
+    store = FactStore(tmp_path / "workspace" / "runtime-v2", user_id="alice")
+    store.save_fact(MemoryFact(memory_id="preference", scope="space", scope_id="one", content="favorite tea"))
     return store
 
 
 def update_in_process(root: Path, barrier: Barrier, output: Connection) -> None:
-    store = MemoryStore(root, user_id="alice")
+    store = FactStore(root, user_id="alice")
     barrier.wait(timeout=10.0)
     try:
-        fact = store.update_fact("conversation", "preference", "new tea", expected_revision=1, conversation_id="one")
+        fact = store.update_fact("space", "preference", "new tea", expected_revision=1, space_id="one")
     except MemoryConflictError as error:
         output.send(error.code)
     else:
@@ -31,13 +31,11 @@ def update_in_process(root: Path, barrier: Barrier, output: Connection) -> None:
         output.close()
 
 
-def test_memory_edits_persist_host_provenance_without_inventing_old_sources(memory: MemoryStore) -> None:
-    updated = memory.update_fact(
-        "conversation", "preference", "favorite coffee", expected_revision=1, conversation_id="one"
-    )
+def test_memory_edits_persist_host_provenance_without_inventing_old_sources(memory: FactStore) -> None:
+    updated = memory.update_fact("space", "preference", "favorite coffee", expected_revision=1, space_id="one")
 
-    reopened = MemoryStore(memory.root, user_id="alice")
-    history = reopened.fact_history("conversation", "preference", conversation_id="one")
+    reopened = FactStore(memory.root, user_id="alice")
+    history = reopened.fact_history("space", "preference", space_id="one")
     assert [fact.revision for fact in history] == [1, 2]
     assert history[0].source is None
     assert history[0].recorded_at is None
@@ -50,133 +48,131 @@ def test_memory_edits_persist_host_provenance_without_inventing_old_sources(memo
     assert reopened.recall("one", "coffee", 5) == (updated,)
 
 
-def test_deactivated_memory_stays_visible_in_history_but_is_not_recalled(memory: MemoryStore) -> None:
-    stopped = memory.deactivate_fact("conversation", "preference", expected_revision=1, conversation_id="one")
+def test_deactivated_memory_stays_visible_in_history_but_is_not_recalled(memory: FactStore) -> None:
+    stopped = memory.deactivate_fact("space", "preference", expected_revision=1, space_id="one")
 
     assert stopped.revision == 2
     assert not stopped.active
     assert stopped.content == "favorite tea"
     assert stopped.source == "local_user"
     assert memory.recall("one", "tea", 5) == ()
-    assert memory.list_facts("conversation", conversation_id="one") == ()
-    assert memory.list_facts("conversation", conversation_id="one", include_inactive=True) == (stopped,)
-    assert [fact.active for fact in memory.fact_history("conversation", "preference", conversation_id="one")] == [
+    assert memory.list_facts("space", space_id="one") == ()
+    assert memory.list_facts("space", space_id="one", include_inactive=True) == (stopped,)
+    assert [fact.active for fact in memory.fact_history("space", "preference", space_id="one")] == [
         True,
         False,
     ]
 
 
-def test_stale_memory_edit_does_not_append_another_revision(memory: MemoryStore) -> None:
-    memory.update_fact("conversation", "preference", "new tea", expected_revision=1, conversation_id="one")
+def test_stale_memory_edit_does_not_append_another_revision(memory: FactStore) -> None:
+    memory.update_fact("space", "preference", "new tea", expected_revision=1, space_id="one")
 
     with pytest.raises(MemoryConflictError) as caught:
-        memory.deactivate_fact("conversation", "preference", expected_revision=1, conversation_id="one")
+        memory.deactivate_fact("space", "preference", expected_revision=1, space_id="one")
 
     assert caught.value.code == "weave.memory_conflict"
     assert "current revision is 2" in caught.value.message
-    assert [fact.revision for fact in memory.fact_history("conversation", "preference", conversation_id="one")] == [
+    assert [fact.revision for fact in memory.fact_history("space", "preference", space_id="one")] == [
         1,
         2,
     ]
-    assert memory.list_facts("conversation", conversation_id="one")[0].active
+    assert memory.list_facts("space", space_id="one")[0].active
 
 
 @pytest.mark.parametrize("revision", [0, -1])
-def test_memory_edits_require_a_positive_expected_revision(memory: MemoryStore, revision: int) -> None:
+def test_memory_edits_require_a_positive_expected_revision(memory: FactStore, revision: int) -> None:
     with pytest.raises(ValueError, match="expected_revision must be positive"):
-        memory.update_fact("conversation", "preference", "new tea", expected_revision=revision, conversation_id="one")
+        memory.update_fact("space", "preference", "new tea", expected_revision=revision, space_id="one")
 
-    assert len(memory.fact_history("conversation", "preference", conversation_id="one")) == 1
+    assert len(memory.fact_history("space", "preference", space_id="one")) == 1
 
 
-def test_save_fact_cannot_bypass_revision_checked_memory_edits(memory: MemoryStore) -> None:
+def test_save_fact_cannot_bypass_revision_checked_memory_edits(memory: FactStore) -> None:
     with pytest.raises(ValueError, match="updates require expected_revision"):
         memory.save_fact(
-            MemoryFact(memory_id="preference", scope="conversation", scope_id="one", content="forged", revision=99)
+            MemoryFact(memory_id="preference", scope="space", scope_id="one", content="forged", revision=99)
         )
     with pytest.raises(MemoryConflictError):
-        memory.save_fact(MemoryFact(memory_id="preference", scope="conversation", scope_id="one", content="duplicate"))
+        memory.save_fact(MemoryFact(memory_id="preference", scope="space", scope_id="one", content="duplicate"))
     with pytest.raises(ValueError, match="start at revision 1"):
-        memory.save_fact(MemoryFact(memory_id="new", scope="conversation", scope_id="one", content="gap", revision=7))
+        memory.save_fact(MemoryFact(memory_id="new", scope="space", scope_id="one", content="gap", revision=7))
 
-    facts = memory.list_facts("conversation", conversation_id="one")
+    facts = memory.list_facts("space", space_id="one")
     assert len(facts) == 1
     assert facts[0].content == "favorite tea"
     assert facts[0].revision == 1
 
 
-def test_missing_memory_update_does_not_create_a_fact(memory: MemoryStore) -> None:
+def test_missing_memory_update_does_not_create_a_fact(memory: FactStore) -> None:
     with pytest.raises(LookupError, match="not found"):
-        memory.update_fact("conversation", "missing", "new tea", expected_revision=1, conversation_id="one")
+        memory.update_fact("space", "missing", "new tea", expected_revision=1, space_id="one")
 
-    assert memory.fact_history("conversation", "missing", conversation_id="one") == ()
+    assert memory.fact_history("space", "missing", space_id="one") == ()
 
 
-def test_empty_memory_update_does_not_append_invalid_content(memory: MemoryStore) -> None:
+def test_empty_memory_update_does_not_append_invalid_content(memory: FactStore) -> None:
     with pytest.raises(ValueError):
-        memory.update_fact("conversation", "preference", "", expected_revision=1, conversation_id="one")
+        memory.update_fact("space", "preference", "", expected_revision=1, space_id="one")
 
-    assert memory.list_facts("conversation", conversation_id="one")[0].content == "favorite tea"
-    assert len(memory.fact_history("conversation", "preference", conversation_id="one")) == 1
+    assert memory.list_facts("space", space_id="one")[0].content == "favorite tea"
+    assert len(memory.fact_history("space", "preference", space_id="one")) == 1
 
 
-def test_legacy_memory_records_keep_unknown_provenance(memory: MemoryStore) -> None:
-    original = memory.list_facts("conversation", conversation_id="one")[0]
-    memory.fact_path("conversation", "one").write_text(
-        original.model_dump_json(exclude_none=True) + "\n", encoding="utf-8"
-    )
+def test_legacy_memory_records_keep_unknown_provenance(memory: FactStore) -> None:
+    original = memory.list_facts("space", space_id="one")[0]
+    memory.fact_path("space", "one").write_text(original.model_dump_json(exclude_none=True) + "\n", encoding="utf-8")
 
-    restored = MemoryStore(memory.root, user_id="alice").recall("one", "tea", 5)[0]
+    restored = FactStore(memory.root, user_id="alice").recall("one", "tea", 5)[0]
 
     assert restored.content == "favorite tea"
     assert restored.source is None
     assert restored.recorded_at is None
 
 
-def test_memory_management_and_recall_stay_in_the_selected_workspace_and_conversation(
-    memory: MemoryStore, tmp_path: Path
+def test_memory_management_and_recall_stay_in_the_selected_workspace_and_space(
+    memory: FactStore, tmp_path: Path
 ) -> None:
-    other_project = MemoryStore(tmp_path / "other-workspace" / "runtime" / "memory", user_id="alice")
+    other_project = FactStore(tmp_path / "other-workspace" / "runtime-v2", user_id="alice")
 
-    assert other_project.list_facts("conversation", conversation_id="one") == ()
-    assert memory.list_facts("conversation", conversation_id="two") == ()
+    assert other_project.list_facts("space", space_id="one") == ()
+    assert memory.list_facts("space", space_id="two") == ()
     assert memory.recall("two", "tea", 5) == ()
-    with pytest.raises(ValueError, match="conversation_id is required"):
-        memory.list_facts("conversation")
+    with pytest.raises(ValueError, match="space_id is required"):
+        memory.list_facts("space")
     with pytest.raises(PermissionError):
         memory.list_facts("user")
 
 
-def test_user_memory_only_uses_the_opted_in_deployment_user(memory: MemoryStore) -> None:
-    authorized = MemoryStore(memory.root, user_id="alice", cross_conversation=True)
+def test_user_memory_only_uses_the_opted_in_deployment_user(memory: FactStore) -> None:
+    authorized = FactStore(memory.root, user_id="alice", cross_space=True)
     authorized.save_fact(MemoryFact(memory_id="user-fact", scope="user", scope_id="alice", content="favorite tea"))
 
     assert authorized.recall("two", "tea", 5)[0].memory_id == "user-fact"
     assert authorized.list_facts("user")[0].scope_id == "alice"
-    assert MemoryStore(memory.root, user_id="bob", cross_conversation=True).list_facts("user") == ()
+    assert FactStore(memory.root, user_id="bob", cross_space=True).list_facts("user") == ()
     with pytest.raises(PermissionError):
         authorized.save_fact(MemoryFact(memory_id="foreign", scope="user", scope_id="bob", content="private"))
-    with pytest.raises(ValueError, match="only valid for conversation"):
-        authorized.list_facts("user", conversation_id="one")
+    with pytest.raises(ValueError, match="only valid for space"):
+        authorized.list_facts("user", space_id="one")
 
 
 @pytest.mark.parametrize("corruption", ["scope", "revision"])
-def test_memory_recall_rejects_mismatched_or_broken_revision_journals(memory: MemoryStore, corruption: str) -> None:
+def test_memory_recall_rejects_mismatched_or_broken_revision_journals(memory: FactStore, corruption: str) -> None:
     record = MemoryFact(
         memory_id="preference",
-        scope="conversation",
+        scope="space",
         scope_id="other" if corruption == "scope" else "one",
         content="injected",
         revision=2 if corruption == "scope" else 3,
     )
-    with memory.fact_path("conversation", "one").open("a", encoding="utf-8") as stream:
+    with memory.fact_path("space", "one").open("a", encoding="utf-8") as stream:
         stream.write(record.model_dump_json() + "\n")
 
     with pytest.raises(ValueError, match=r"scope does not match|invalid revision chain"):
         memory.recall("one", "tea", 5)
 
 
-def test_two_memory_management_processes_cannot_both_update_the_same_revision(memory: MemoryStore) -> None:
+def test_two_memory_management_processes_cannot_both_update_the_same_revision(memory: FactStore) -> None:
     context = multiprocessing.get_context("spawn")
     barrier = context.Barrier(2)
     pipes = [context.Pipe(duplex=False), context.Pipe(duplex=False)]
@@ -207,19 +203,19 @@ def test_two_memory_management_processes_cannot_both_update_the_same_revision(me
             receive.close()
             send.close()
 
-    assert [fact.revision for fact in memory.fact_history("conversation", "preference", conversation_id="one")] == [
+    assert [fact.revision for fact in memory.fact_history("space", "preference", space_id="one")] == [
         1,
         2,
     ]
 
 
 def test_memory_cli_lists_views_edits_and_deactivates_without_model_or_sandbox_configuration(
-    memory: MemoryStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    memory: FactStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("PLEIAD_SANDBOX_IMAGE", raising=False)
     monkeypatch.delenv("PLEIAD_LLM_API_KEY", raising=False)
-    arguments = ["--workspace", str(tmp_path / "workspace"), "--conversation-id", "one"]
+    arguments = ["--workspace", str(tmp_path / "workspace"), "--space-id", "one"]
     runner = CliRunner()
     decoder = TypeAdapter(tuple[MemoryFact, ...])
 
@@ -243,16 +239,30 @@ def test_memory_cli_lists_views_edits_and_deactivates_without_model_or_sandbox_c
     assert decoder.validate_json(all_facts.stdout)[0].revision == 3
 
 
+def test_memory_cli_leaves_legacy_runtime_facts_unopened(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    legacy = FactStore(workspace / "runtime" / "memory", user_id="alice")
+    legacy.save_fact(MemoryFact(memory_id="old", scope="space", scope_id="one", content="legacy preference"))
+    journal = legacy.fact_path("space", "one")
+    original = journal.read_bytes()
+
+    result = CliRunner().invoke(memory_app, ["--workspace", str(workspace), "--space-id", "one", "list"])
+
+    assert result.exit_code == 0, result.output
+    assert TypeAdapter(tuple[MemoryFact, ...]).validate_json(result.stdout) == ()
+    assert journal.read_bytes() == original
+
+
 def test_memory_cli_reports_version_conflicts_without_overwriting_current_content(
-    memory: MemoryStore, tmp_path: Path
+    memory: FactStore, tmp_path: Path
 ) -> None:
-    memory.update_fact("conversation", "preference", "new tea", expected_revision=1, conversation_id="one")
+    memory.update_fact("space", "preference", "new tea", expected_revision=1, space_id="one")
     result = CliRunner().invoke(
         memory_app,
         [
             "--workspace",
             str(tmp_path / "workspace"),
-            "--conversation-id",
+            "--space-id",
             "one",
             "update",
             "preference",
@@ -265,18 +275,18 @@ def test_memory_cli_reports_version_conflicts_without_overwriting_current_conten
 
     assert result.exit_code == 2
     assert "weave.memory_conflict" in result.stderr
-    assert memory.list_facts("conversation", conversation_id="one")[0].content == "new tea"
+    assert memory.list_facts("space", space_id="one")[0].content == "new tea"
 
 
 def test_memory_cli_user_scope_only_selects_the_deployment_configured_identity(
-    memory: MemoryStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    memory: FactStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     for user_id in ("alice", "bob"):
-        store = MemoryStore(memory.root, user_id=user_id, cross_conversation=True)
+        store = FactStore(memory.root, user_id=user_id, cross_space=True)
         store.save_fact(MemoryFact(memory_id="preference", scope="user", scope_id=user_id, content=f"{user_id} tea"))
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("PLEIAD_MEMORY_USER_ID", "alice")
-    monkeypatch.setenv("PLEIAD_MEMORY_CROSS_CONVERSATION", "true")
+    monkeypatch.setenv("PLEIAD_MEMORY_CROSS_SPACE", "true")
 
     result = CliRunner().invoke(memory_app, ["--workspace", str(tmp_path / "workspace"), "--scope", "user", "list"])
 
@@ -292,8 +302,29 @@ def test_memory_cli_requires_an_explicit_authorized_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, arguments: list[str]
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("PLEIAD_MEMORY_CROSS_CONVERSATION", "false")
+    monkeypatch.setenv("PLEIAD_MEMORY_CROSS_SPACE", "false")
     result = CliRunner().invoke(memory_app, ["--workspace", str(tmp_path / "workspace"), *arguments])
 
     assert result.exit_code == 2
     assert "required" in result.stderr or "authorization scope" in result.stderr
+
+
+def test_space_fact_cleanup_keeps_other_scopes_and_rejects_stale_generations_and_later_writes(
+    memory: FactStore,
+) -> None:
+    authorized = FactStore(memory.root, user_id="alice", cross_space=True)
+    authorized.save_fact(MemoryFact(memory_id="shared", scope="user", scope_id="alice", content="Shared preference"))
+    authorized.save_fact(MemoryFact(memory_id="other", scope="space", scope_id="two", content="Other Space"))
+
+    authorized.delete_space("one", generation="cleanup-one")
+    authorized.delete_space("one", generation="cleanup-one")
+
+    reopened = FactStore(memory.root, user_id="alice", cross_space=True)
+    assert reopened.list_facts("space", space_id="one", include_inactive=True) == ()
+    assert not reopened.fact_path("space", "one").exists()
+    assert [fact.content for fact in reopened.list_facts("space", space_id="two")] == ["Other Space"]
+    assert [fact.content for fact in reopened.list_facts("user")] == ["Shared preference"]
+    with pytest.raises(ValueError, match="generation is obsolete"):
+        reopened.delete_space("one", generation="old-generation")
+    with pytest.raises(PermissionError, match="reclaimed"):
+        reopened.save_fact(MemoryFact(memory_id="late", scope="space", scope_id="one", content="Late write"))

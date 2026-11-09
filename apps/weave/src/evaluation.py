@@ -9,20 +9,24 @@ from typing import Annotated, Literal, Self
 import typer
 from pleiad.agent.agent import Agent
 from pleiad.context.selection.models import ContextBlock
-from pleiad.contracts import CapabilityGrants, ContractModel, JsonObject
+from pleiad.contracts import CapabilityGrants, ContractModel, JsonObject, ToolRef
 from pleiad.errors.base import PleiadError
 from pleiad.events.contracts import Event
 from pleiad.events.runtime import ToolStartedEvent
-from pleiad.memory.short_memory import ShortMemory
 from pleiad.models.anthropic.client import AnthropicModelClient
 from pleiad.models.openai.client import OpenAIModelClient
 from pleiad.observability.tracing import Observability
-from pleiad.runtime.config import RunConfig
-from pleiad.runtime.execution.runner import Runner
-from pleiad.runtime.lifecycle.state import RunStatus, RunUsage
+from pleiad.runtime.limits import RunLimits
 from pleiad.runtime.policy import HostPolicy
+from pleiad.runtime.result import RunResult
+from pleiad.runtime.runner import Runner
 from pleiad.sandbox.backends.oci import OciSandbox
 from pleiad.sandbox.sandbox import Sandbox
+from pleiad.sessions.backends.in_memory import InMemorySessionStore
+from pleiad.sessions.input import InputEnvelope
+from pleiad.sessions.records import RunStatus
+from pleiad.sessions.session import Session
+from pleiad.sessions.usage import RunUsage
 from pleiad.skills.loader import SkillLoader
 from pleiad.tools.builtins.defaults import install_default_tools
 from pleiad.tools.registry import ToolRegistry
@@ -281,23 +285,34 @@ async def evaluate_case(
                 prompt=(
                     "Solve the task using the supplied files. Return only the requested JSON object, without Markdown."
                 ),
+                tools=(ToolRef("read_file"),),
             )
             blocks = (
                 (ContextBlock(kind="business_input", origin="evaluation", content=canonical_json(case.input)),)
                 if case.input
                 else ()
             )
-            result = await runner.run(
-                agent,
-                case.objective,
-                memory=ShortMemory.in_memory(case.case_id),
-                config=RunConfig(),
-                context_blocks=blocks,
+            session = Session(case.case_id, InMemorySessionStore())
+            input_id = f"evaluation:{case.case_id}:input"
+            await session.enqueue(
+                InputEnvelope(input_id=input_id, kind="user", source="evaluation", content=case.objective)
             )
+            handle = await runner.start(
+                agent,
+                session=session,
+                invocation_id=f"evaluation:{case.case_id}",
+                input_ids=(input_id,),
+                input_mode="batch",
+                limits=RunLimits(),
+                context=blocks,
+            )
+            async with handle:
+                result = await handle.result()
             unchanged = all((workspace / path).read_text(encoding="utf-8") == text for path, text in case.files.items())
             allowed = all(tool in {"read_file", "read_tool_result"} for tool in attempted)
             passed = (
-                result.status is RunStatus.SUCCEEDED
+                isinstance(result, RunResult)
+                and result.state is RunStatus.SUCCEEDED
                 and score_output(case, result.final_output)
                 and unchanged
                 and allowed
@@ -307,8 +322,10 @@ async def evaluate_case(
                 reason = "unauthorized_tool_attempt"
             elif not unchanged:
                 reason = "fixture_modified"
-            elif result.status is not RunStatus.SUCCEEDED:
-                reason = result.error.code if result.error is not None else f"run.{result.status.value}"
+            elif not isinstance(result, RunResult):
+                reason = "run.paused"
+            elif result.state is not RunStatus.SUCCEEDED:
+                reason = result.error.code if result.error is not None else f"run.{result.reason}"
             elif not passed:
                 reason = "answer_mismatch"
             return CaseResult(
@@ -316,7 +333,7 @@ async def evaluate_case(
                 case_fingerprint=case.fingerprint(),
                 status="passed" if passed else "failed",
                 run_id=result.run_id,
-                output=result.final_output,
+                output=result.final_output if isinstance(result, RunResult) else None,
                 error=reason,
                 elapsed_seconds=time.monotonic() - started,
                 usage=result.usage,

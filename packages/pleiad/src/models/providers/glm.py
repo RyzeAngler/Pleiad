@@ -4,6 +4,7 @@ from types import TracebackType
 from typing import Protocol, runtime_checkable
 
 from anthropic import AnthropicError, AsyncAnthropic
+from httpx import TimeoutException, TransportError
 from pydantic import SecretStr
 from zai import ZhipuAiClient
 from zai.core import StreamResponse, ZaiError
@@ -21,8 +22,10 @@ from pleiad.models.anthropic.response import (
     parse_response as parse_anthropic_response,
 )
 from pleiad.models.errors import (
+    ModelConnectionError,
     ModelRequestError,
     ModelResponseError,
+    ModelTimeoutError,
     classify_provider_error,
 )
 from pleiad.models.openai.request import OpenAIRequest
@@ -103,6 +106,10 @@ class OpenAIProvider:
             create: Callable[..., object] = self.client.chat.completions.create
             raw = await offload(lambda: create(**payload))
             return parse_openai_response(raw)
+        except TimeoutException as error:
+            raise ModelTimeoutError() from error
+        except TransportError as error:
+            raise ModelConnectionError() from error
         except ZaiError as error:
             raise classify_provider_error(error) from error
         except (AttributeError, KeyError, TypeError, ValueError) as error:
@@ -138,6 +145,10 @@ class OpenAIProvider:
                 raise ModelResponseError(
                     "The GLM stream ended without a finish reason.",
                 )
+        except TimeoutException as error:
+            raise ModelTimeoutError() from error
+        except TransportError as error:
+            raise ModelConnectionError() from error
         except ZaiError as error:
             raise classify_provider_error(error) from error
         except SystemFault:
@@ -187,6 +198,10 @@ class AnthropicProvider:
             create: Callable[..., Awaitable[object]] = self.client.messages.create
             raw = await create(**payload)
             return parse_anthropic_response(raw)
+        except TimeoutException as error:
+            raise ModelTimeoutError() from error
+        except TransportError as error:
+            raise ModelConnectionError() from error
         except AnthropicError as error:
             raise classify_provider_error(error) from error
         except SystemFault:
@@ -221,6 +236,10 @@ class AnthropicProvider:
                 raise ModelResponseError(
                     "The GLM stream ended without message_stop.",
                 )
+        except TimeoutException as error:
+            raise ModelTimeoutError() from error
+        except TransportError as error:
+            raise ModelConnectionError() from error
         except AnthropicError as error:
             raise classify_provider_error(error) from error
         except SystemFault:

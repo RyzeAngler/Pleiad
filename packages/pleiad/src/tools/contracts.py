@@ -3,7 +3,7 @@ from typing import Self
 
 from pydantic import Field, model_validator
 
-from pleiad.contracts import CapabilityGrants, ContractModel, JsonObject, ToolRef
+from pleiad.contracts import CapabilityGrants, ContractModel, JsonObject, ToolRef, UsageCharge
 from pleiad.errors.base import ErrorType
 
 DEFAULT_TOOL_CODES = ("read_file", "write_file", "command")
@@ -30,14 +30,17 @@ class ToolPolicy(ContractModel):
     max_concurrency: int = Field(default=1, ge=1, le=1_024)
     parallel_safe: bool = False
     idempotent: bool = False
+    background: bool = False
 
 
 class ParentRunLimits(ContractModel):
     """Remaining parent Run limits visible at a nested execution boundary."""
 
     deadline: datetime
-    remaining_turns: int = Field(ge=0)
+    remaining_model_steps: int = Field(ge=0)
     remaining_output_tokens: int = Field(ge=0)
+    child_model_calls: int = Field(default=0, ge=0)
+    child_budget_output_tokens: int = Field(default=0, ge=0)
     tool_concurrency: int = Field(gt=0)
 
 
@@ -47,10 +50,27 @@ class ToolContext(ContractModel):
     call_id: str = Field(min_length=1)
     run_id: str | None = Field(default=None, min_length=1)
     parent_run_id: str | None = Field(default=None, min_length=1)
-    turn_id: str | None = Field(default=None, min_length=1)
+    step_id: str | None = Field(default=None, min_length=1)
     grants: CapabilityGrants = CapabilityGrants()
     parent_limits: ParentRunLimits | None = None
     metadata: JsonObject = Field(default_factory=dict)
+
+
+class ToolSubmission(ContractModel):
+    """Persist the resolved action identity and request digest before backend submission."""
+
+    operation_id: str = Field(min_length=1, max_length=256)
+    request_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class ToolAcceptance(ContractModel):
+    """Persist concrete backend acceptance before returning a started Tool result."""
+
+    operation_id: str = Field(min_length=1, max_length=256)
+    backend: str = Field(min_length=1, max_length=128)
+    reference: str = Field(min_length=1, max_length=4096)
+    request_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    details: JsonObject = Field(default_factory=dict)
 
 
 class ToolCall(ContractModel):
@@ -66,6 +86,7 @@ class ToolResult(ContractModel):
 
     call_id: str = Field(min_length=1)
     ok: bool
+    usage_charges: tuple[UsageCharge, ...] = ()
     output: JsonObject | None = None
     error_code: str | None = Field(default=None, min_length=1)
     error_message: str | None = Field(default=None, min_length=1)

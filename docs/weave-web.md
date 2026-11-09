@@ -1,476 +1,114 @@
-# Weave 网页版：启动与操作
+# Weave Web 使用指南
 
-Weave Web 与 HTTP API 由同一个 `pleiad serve` 进程提供。网页中的空间、任务、消息、Graph、节点结果与审批都读取真实后端；没有演示数据或浏览器内的模拟执行器。
+## 启动
 
-## 1. 环境准备
-
-从仓库根目录执行后续命令，避免 `.env` 和相对工作区路径发生变化。
-
-需要：
-
-- Python 3.12 与仓库固定的 uv 版本（见 `.uv-version`）；
-- Node.js 22.12 或更新版本，以及 npm；仅从源码构建前端时需要；
-- 一个已配置的模型接口；
-- Docker 或 Podman，以及本地已有、使用固定 digest 的沙箱镜像。执行工作区脚本和命令时需要运行中的容器引擎。
-
-安装 Python 与前端依赖并构建：
+在仓库根目录安装所需模型依赖，填写宿主 `.env`，构建静态 UI，再启动唯一 HTTP Owner。
 
 ```bash
-uv sync --project apps/weave --locked --all-groups --all-extras
+uv sync --project apps/weave --extra deepseek
 npm --prefix apps/weave/web ci
 npm --prefix apps/weave/web run build
-```
-
-构建结果写入 `apps/weave/src/web/assets/`，会随 Weave wheel 和 sdist 一起发行。只修改网页样式、字体或组件后，重新执行 `npm --prefix apps/weave/web run build` 并刷新页面；如果运行的是严格 editable 安装，新增的静态文件还需通过 `uv sync --project apps/weave --locked --all-groups --all-extras` 更新安装清单，并重启服务。修改 Python 服务或启动配置后，也需要在原终端正常退出并重新启动 `pleiad serve`。刷新浏览器不会重新加载 Python 服务代码。已安装的发行包自带静态资源，不要求使用者再安装 Node.js。
-
-网页统一使用本地 MiSans，正文、标签和标题分别使用 Regular、Medium 和 Semibold；代码保留等宽字体。字体文件位于 `apps/weave/web/src/fonts/misans/`，来自固定版本 `misans@5.0.0`（字体 4.009），按 Unicode 分片加载，不连接外部字体 CDN。构建会把字体、来源说明和小米许可一并打包；页面的 `rel="license"` 链接可访问完整声明。第三方字体不适用项目自身的 MIT 许可，原始许可见 [MiSans 官方下载页](https://hyperos.mi.com/font/zh/download/)。
-
-2026-11-05 的字体改造、桌面与窄屏检查和测试结果见 [MiSans 验收记录](../apps/weave/web/font-qa.md)。
-
-## 2. 配置模型与沙箱
-
-如果已经有可用的 `.env`，继续使用，**不要覆盖原文件**。首次使用时复制模板：
-
-```bash
-cp .env.example .env
-```
-
-编辑仓库根目录的 `.env`。沿用当前模板的提供商时，至少填写：
-
-```dotenv
-PLEIAD_LLM_PROTOCOL=openai
-PLEIAD_LLM_PROVIDER=deepseek
-PLEIAD_LLM_MODEL=deepseek-v4-flash
-PLEIAD_LLM_API_KEY=填写自己的密钥
-PLEIAD_SANDBOX_RUNTIME=docker
-PLEIAD_SANDBOX_IMAGE=填写本地真实的镜像名@sha256:digest
-```
-
-模型名称、协议和地址应与自己的提供商配置一致。不要把 `.env`、密钥或服务凭据放入默认指令或能力 YAML。模型设置在启动时读取；修改后重启服务。
-
-### 启动容器引擎
-
-安装 Docker 命令行工具并不代表容器引擎已经运行。macOS 上若已安装 Colima，并使用默认 Docker 运行时，先执行：
-
-```bash
-colima start
-colima status
-docker context ls
-docker info
-```
-
-`colima status` 应显示运行中，`docker info` 应成功返回包含 Server 的引擎信息。确认这些检查通过后，再配置镜像。[Colima 启动说明](https://colima.run/docs/getting-started/)、[Docker 引擎排查](https://docs.docker.com/engine/daemon/troubleshoot/)。
-
-如果 Colima 已运行，但 Docker 仍连接失败，检查 `docker context ls` 中带 `*` 的当前连接。若仍指向不可用的 `default`，且列表中已存在 `colima`，可切换后重试：
-
-```bash
-docker context inspect colima
-docker context use colima
-docker info
-```
-
-使用其他 Colima profile 时，以列表中的实际 context 名称为准。`DOCKER_HOST` 或 `DOCKER_CONTEXT` 环境变量也可能覆盖当前连接；应在启动 Weave 的同一个终端检查这些变量。连接目标应与运行中的容器引擎一致。[Docker context 说明](https://docs.docker.com/engine/manage-resources/contexts/)。
-
-### 配置沙箱镜像
-
-沙箱镜像必须是完整的 `name@sha256:<64位十六进制字符>`，不能只写可变标签，也不能使用示例中的占位值。以只需要 Python 标准库的工具为例，容器引擎可用后，拉取官方 Python 镜像并查看真实 digest：
-
-```bash
-docker pull python:3.12-slim
-docker image inspect python:3.12-slim --format '{{index .RepoDigests 0}}'
-```
-
-把第二条命令的完整输出填入 `PLEIAD_SANDBOX_IMAGE`。使用 Podman 时替换命令并设置 `PLEIAD_SANDBOX_RUNTIME=podman`。工具若依赖额外的 Python 包，需要使用包含相应依赖的受控镜像；基础 Python 镜像不会自动安装这些包。
-
-使用命令工具前先执行 `docker info` 或 `podman info`，确认引擎已启动。SDK 内置的 `command` 也依赖沙箱；Graph 没有直接绑定 Tools 不代表禁用了内置工具。
-
-默认工作区为仓库的 `workspace/`。另用工作区时，应准备它自己的能力目录、Tools 和 Skills，并在 `.env` 中设置绝对路径：
-
-```dotenv
-PLEIAD_WORKSPACE=/absolute/path/to/workspace
-```
-
-使用 Colima 时，工作区还必须位于虚拟机已共享的目录中。本机已验证用户主目录下的工作区可用；macOS 的 `/private/var/folders/` 临时目录未被共享，挂载时会出现 `bind source path does not exist`。遇到该错误时检查共享路径，不要仅凭宿主机上目录存在就判断挂载可用。
-
-## 3. 启动网页
-
-```bash
 uv run --project apps/weave --frozen pleiad serve --host 127.0.0.1 --port 8000
 ```
 
-浏览器打开 **http://127.0.0.1:8000/**。
+模型配置使用 `PLEIAD_LLM_PROVIDER`、`PLEIAD_LLM_PROTOCOL`、`PLEIAD_LLM_MODEL`、`PLEIAD_LLM_API_KEY` 和可选 base URL。视觉与语音角色由对应宿主变量配置。前端源码构建需要 Node.js 22.12+。
 
-- 健康检查：http://127.0.0.1:8000/healthz
-- 接口文档：http://127.0.0.1:8000/docs
-- 退出：在启动服务的终端按 `Ctrl+C`。
+`PLEIAD_SANDBOX_IMAGE` 必须填写 Docker 或 Podman 中实际可用的完整镜像 digest。工作区必须位于容器引擎允许挂载的目录。先通过对应引擎的 `info` 命令检查连通性。
 
-这是本地单所有者应用，当前没有多用户登录与鉴权。默认只监听本机；不要直接把该端口暴露到公网。同一个工作区只能由一个运行服务拥有，不能同时启动占用同一工作区的 TUI 与 Web 服务。
+浏览器打开 `http://127.0.0.1:8000/`。`/healthz` 检查 HTTP 存活，`/readyz` 检查工作区 Owner 就绪，`/docs` 提供 OpenAPI。终端 `Ctrl+C` 触发服务清理。
 
-## 4. 第一次使用
+这是本地单所有者部署。服务检查本地 Host、同源 Origin 和写请求的 CSRF token。CLI 和 TUI 连接同一个 Owner，可使用 `PLEIAD_SERVER_URL` 配置地址。
 
-### 工作区、空间与任务
+## 永久主聊天
 
-网页分为三个层级：**工作区 → 空间 → 任务**。任务根据实际内容显示纯对话，或展开 Graph 与执行结果；这两种视图属于同一任务。
+没有有效 URL 路由时，应用默认进入居中的聊天视图。打开 Space、Execution、资源或内容后，切换为导航、左侧主聊天和右侧工作区的分栏布局。两种视图共用同一消息历史与唯一输入框。
 
-- 工作区首页展示空间卡片和跨空间最近任务。卡片显示任务概况，不把默认指令当作空间简介。点击空间进入其新任务页，点击最近任务直接继续对应会话。
-- 顶部 Weave 标识返回工作区。「搜索」默认查询全部空间的任务，按任务标题和所属空间名称匹配；结果显示所属空间。
-- 进入空间后，空间名称打开切换菜单，菜单只列空间。已有任务的名称单独显示；「空间设置」位于当前空间的操作区，打开独立设置页。
-- 顶栏「资源库」打开整个工作区的模型、Tools 和 Skills 目录。资源偏好在空间设置中选择，不混入全局资源库。
-- 进入已有任务后，顶部「新任务」回到所属空间的空白输入页并聚焦输入框。工作区首页和已经处于新任务的页面不重复显示该按钮；发送第一条消息才创建任务会话。
+点击 Weave 标识或主聊天图标会切换到聊天视图、隐藏工作区，并聚焦主输入框。聊天阅读位置与未读提示保留；回到最新消息使用“有新消息”或“回到底部”入口。隐藏的工作区继续保留当前对象、标签、展开内容、筛选和滚动状态，返回后继续查看。导航高亮由当前路由决定，浏览器前进与后退恢复对应视图。切换视图保留草稿、附件及关联标签。
 
-搜索支持清空、空结果反馈、读取失败后重试、上下方向键和 Enter 选择任务。搜索与空间切换面板可用关闭按钮、外部点击或 `Esc` 收起；Tab 焦点留在打开的面板内，关闭后返回入口。
+普通消息由 Router 判断是直接回复、派发新工作，还是补充已有工作。点击 Execution 的补充操作，只在输入框上方添加可关闭的“补充：任务名称”标签并聚焦正文，保留已有草稿。长名称省略显示，完整名称可查看。点击“取消补充”只解除该目标关联，保留正文、附件与其他目标；添加和取消补充都不自动发送消息。只有明确点击发送或按 Enter 才提交。composer 不提供取消任务按钮，任务取消统一在工作详情操作。引用 Space、产物或 Graph 节点添加只读上下文。附件先上传，正式发送时与 Message 原子关联。
 
-### 对话创建空间
+正式报告显示来源工作和实际产物卡。点击产物在右侧查看元信息与受控内容，主输入框保留当前草稿。
 
-在工作区首页点击「创建空间」，描述用途；有长期偏好时可以一起说明。例如：
+输入框在聊天区域底部居中，聊天视图最大 480px；分栏工作区中宽度约为聊天栏的 74%，最大 360px。默认一行，附件、正文和发送按钮同排；正文增长时只增加高度，清空后恢复单行。不显示功能备注、快捷键说明或常驻计数。输入框支持 Enter 发送、Shift+Enter 换行和中文输入法组合。尚未确认的请求保留稳定客户端键，重试返回原收据。连接恢复时先刷新 snapshot，再核验当前目标、附件和引用。
 
-> 建一个小红书写作空间。主要写旅行内容，引用资料保留来源，语气自然，定稿前由我确认。
+正文按服务公布的 UTF-8 字节上限校验，达到上限的 90% 时显示接近上限提示，超限后提示删减并禁用发送。已添加附件显示为文件卡片。
 
-点击发送或按 Enter 后，后端使用当前配置的文本模型整理空间草稿。右侧显示可编辑的名称、默认指令与资源偏好。默认指令可留空，不影响创建；草稿生成提示要求只保留用户明确提出的长期偏好，不把简单用途扩写成规则清单，也不把一次任务的要求保存为默认指令。可以直接修改预览，也可以继续对话补充；下一轮整理会携带当前手工修改的草稿。资源偏好只能选择目录中已经配置的 Tool 和 Skill，不会安装资源或授予执行权限。
+每张 Attention 卡标明所属 Space 和真实工作目标，并提供来源工作的详情入口。同文问题按各自的持久身份分别处理。Attention 的回答进入同一个主输入框。发送通过 resolve 接口保存一条用户 Message 和回答，审批使用明确的批准或拒绝操作，并绑定当前 action digest。暂停中的 Execution 收到回答后仍由当前控制意图决定何时继续。
 
-确认后点击「创建并进入」，空间才会写入后端。草稿生成期间没有空间、任务或 Execution 记录；关闭弹窗会取消尚未完成的草稿模型调用，未保存的草稿不会成为空间。生成失败保留输入和已有草稿，显示错误供重试；不会截取描述充当生成结果，也不会悄悄换模型。生成超时上限为 120 秒，同时受当前模型更短的超时设置约束。
+## Space 与 Execution
 
-存在未发送的补充内容时，需要先发送后再确认创建，避免保存未更新的预览。创建提交期间禁用重复操作和关闭；其他时候可通过关闭按钮、外部点击或 `Esc` 退出。
+Space 保存名称、用途、长期指令、模型角色和资源选择。设置保存使用 expected revision，编辑期间显示未保存状态。归档限制新工作，恢复后可重新派发。删除先查看服务端预览，确认后显示清理进度与阻塞原因。
 
-空间保存名称、默认指令与偏好资源。它不是一次执行，也不是一条无限增长的会话。新空间没有初始 Graph；后续任务产生的编排可按精确版本保存到空间。
+Execution 是持久工作身份。概览展示状态、目标、结果、预算、待办与子任务。暂停、继续、取消和重试按钮由服务端 `available_actions` 决定。重试保存来源 Execution，新 Run 延续产品的明确输入与预算规则。
 
-### 空间设置与默认指令
+过程视图以时间线展示真实步骤，用“阅读任务要求”“执行命令”等动作名称组织内容。步骤按 `run_sequence` 从新到旧展示，最新步骤默认展开；其余按需展开后才加载所属结果。调用记录按 `attempt` 倒序，默认选择 API 返回的全局 `latest_run_id`，超过一页也能定位最新调用。最新调用尚未取得 SDK Run 时，该值为 null，显示等待状态，不回退到旧的已完成调用。
 
-从空间操作区进入「空间设置」，修改名称、可选的默认指令及优先使用的资源。点击「选择资源」搜索目录并选择 Tools／Skills；取消选择或移除已选标签不会卸载资源。点击「保存」才提交修改；没有有效变更时按钮不可用，保存失败会保留编辑内容。
+调用和步骤均先全局倒序再分页，以排他的 `before_sequence` 读取更早记录。首次读取最新步骤后固定当前上界，实时刷新保留当前范围、展开状态和阅读位置；有新增步骤时显示“查看最新进展”，点击后再切换到最新范围。“查看更早步骤”使用 `next_before_sequence`，新增步骤不会挤动历史页。GraphRun 与节点尝试仍有各自独立的选择和分页。
 
-保存期间全局导航会暂时阻止离开并显示提示，保存失败后错误可见且可重试。编排预览的一般读取失败可重新加载；若保存引用已过期，应关闭预览并刷新设置，不对同一个过期引用反复重试。
+任务正文按 Markdown 排版，命令与输出保持原文，工具包装和运行时标识不进入普通页面。调用结果与后台最终结果仍归于各自实际调用，并独立分页。模型步骤完成和后台操作完成分别显示，未返回、取消及失败结果保留真实状态。Graph 画布使用真实边和节点状态；没有 Graph 时不显示空选择器。此展示顺序不改变 SDK 中消息和步骤的原始顺序。
 
-默认指令是这个空间中反复使用的提示，例如“默认从杭州出发，优先公共交通”。本次对话说“这次从上海出发”时，按本次任务处理。每条消息提交后，后端将当时的空间配置保存为该 Execution 的快照；修改设置只影响后续提交，不改动正在执行或历史任务的快照。
+材料与产物保留来源和归属。图片、PDF、文本与 Markdown 由右侧内容视图预览，下载经服务端摘要校验。文本预览具有大小上限。
 
-这些指令以用户级上下文发送给主 Agent 和 Graph 节点。Graph 节点同时收到本次任务，不需要主 Agent 手动把默认指令复制进每个节点；上下文不会改写已保存的 Graph 或节点业务输入。空白指令不注入。默认指令提供任务偏好，不能代替权限配置或强制审批。
+资料标签展示工作说明、中文工具与技能名称、收到的要求及实际状态。送达、助手读取和处理责任是独立事实，分别更新。失败发送的错误和重新发送按钮留在原要求下面。配置版本、模型角色代码、读取位置、原始 ID、投递代次及功能介绍不在普通界面展示，也不另设技术详情折叠。
 
-「已保存的编排」中的「查看」读取保存的精确版本，只预览，不创建 Execution 或运行节点。点击「取消默认编排」并保存后，后续任务不再自动带上这个引用；历史 Graph 和执行记录仍保留。
+## 资源与配置
 
-设置有未保存修改时，返回、导航或关闭页面会提醒确认。取消离开会保留编辑内容；确认离开才放弃未保存修改。从设置返回原空间或任务时，原先尚未发送的对话输入仍保留。从设置打开资源库后，资源库的返回入口回到设置。
+资源目录展示模型、Tool、Skill 和环境的摘要，所有类型均可点击打开详情。详情读取完整 `ResourceDetail`，按基本信息、配置、输入参数、返回内容、技能原文和文件列表展示实际存在的内容，并提供完整原始数据及复制入口。名称、代码、可用性、说明、配置位置和原始字段均保留；不添加功能介绍或缺失版本的占位说明。“已配置”仅表示存在配置，不代表已完成模型连接验证。
 
-### 删除任务与空间
+密钥、令牌、密码、认证头及 URL 内凭据在服务端生成响应前加掩码；详情正文、原始数据和复制结果共用脱敏后的数据，浏览器不会收到这些凭据明文。schema 的字段名称、类型及结构保留，敏感示例和默认值掩码。Space 设置只选择当前宿主允许的资源。模型密钥、安装、MCP 凭据和连接配置由宿主管理；查看详情与复制信息不修改授权。
 
-最近任务列表中，每项右侧都有删除按钮；进入任务后，也可以使用顶栏的「删除任务」。在「空间设置」底部点击「删除空间」，会同时删除该空间下的任务。确认弹窗会显示目标名称与删除范围，默认聚焦「取消」。删除无法撤销；提交期间不能重复操作，失败时保留弹窗并显示原因。
+`mcp.json` 提供 HTTP 和 stdio 连接选择、允许工具列表和凭据变量。OAuth 通过 `pleiad mcp-login SERVER_CODE` 在终端授权。接入步骤见 [能力指南](weave-capabilities.md)。
 
-删除任务会清理会话消息、执行与事件记录、Graph 运行和节点记录、关联产物及会话范围的记忆。没有其他引用的 Graph 版本也会清理；空间保存的编排和其他任务仍在使用的版本会保留。模型、Tools、Skills、工作区文件以及跨会话的用户记忆不随任务删除。
+设置页展示只读宿主摘要和本地显示偏好。默认产品数据根目录是 `workspace/runtime-v2/`，本地事实保存在其 `facts/` 目录。Worker 的文件和命令工具使用 `workspace/work/{space_id}/{execution_id}/`，附件与产物通过受控 `execution_content` 入口读取。显式选择共享 workspace 资源后，可用 `workspace_resource` 只读查询并 materialize 资料。
 
-排队、运行、等待审批或尚未完成清理的任务不能删除。先停止执行，等清理完成后再删除；空间内任何任务未结束时，也会阻止删除整个空间。任务删除成功后返回所属空间，空间删除成功后返回工作区首页；刷新页面后不会重新出现。只保留已删除任务的 ID，防止旧标签页用原 ID 重新提交执行，不保留任务内容。
+可选本地目录观察源使用 `PLEIAD_OBSERVE_DIRECTORY` 配置。读取配置与 observation 分页相互独立，显式 observe 请求提交去重元数据。健康查询检查目录访问状态。
 
-如果删除还需要清理 Graph 版本，而其他任务尚在运行，也会暂时阻止删除，以免移除正在被引用的编排。没有 Graph 需要清理的任务不受这个限制。
+## HTTP 契约
 
-### 通过对话开始任务
+| 路由 | 用途 |
+| --- | --- |
+| `GET /v1/snapshot` | 一致快照、全局水位与浏览器写 token |
+| `GET/POST /v1/chat/messages` | 永久主聊天分页和原子提交 |
+| `GET /v1/events` | 全局序列 SSE 回放 |
+| `GET /v1/spaces`、`GET /v1/spaces/{id}` | Space 列表与详情 |
+| `PATCH /v1/spaces/{id}` | 带 revision 和 request ID 的设置修改 |
+| `POST /v1/spaces/{id}/archive`、`restore` | Space 生命周期 |
+| `GET /v1/spaces/{id}/deletion-preview`、`DELETE /v1/spaces/{id}` | 删除预览与确认 |
+| `GET /v1/executions`、`GET /v1/executions/{id}` | 工作列表与详情 |
+| `GET /v1/executions/{id}/tool-results/{result_id}` | `view=display` 先从完整结果提取可读内容，再按 UTF-8 字节分页；`view=raw` 保留诊断表示。两者执行同样的归属校验 |
+| `GET /v1/executions/{id}/runs` | 按 attempt 倒序，使用 before_sequence 加载更早调用；latest_run_id 标识全局最新调用的 SDK Run，尚未启动时为 null |
+| `GET /v1/executions/{id}/runs/{run_id}` | 所有权校验后的 Run 详情，步骤按 run_sequence 倒序且使用 before_sequence 分页；operations 提供当页实际后台执行状态，tool_results 提供真实结果引用 |
+| `POST /v1/executions/{id}/pause`、`resume`、`cancel`、`retry` | 工作控制 |
+| `GET /v1/attentions`、`GET /v1/attentions/{id}` | 用户待办 |
+| `POST /v1/attentions/{id}/resolve` | 原子回答或审批 |
+| `POST /v1/attachments` | 有界 multipart 上传 |
+| `GET /v1/artifacts/{id}`、`/content` | 产物元数据与内容 |
+| `GET /v1/resources`、`GET /v1/resources/{kind}/{code}` | 只读资源目录摘要与完整 ResourceDetail；详情字段在服务端统一脱敏 |
+| `GET /v1/settings` | 只读宿主摘要 |
+| `/v1/sources` | 显式配置的只读观察源 |
 
-进入空间后，页面中央是任务输入区，下方是该空间的最近任务。直接描述目标，例如：
+写请求从 snapshot 的 `capabilities.csrf_token` 取得 token，并放入 `X-Weave-CSRF`。SSE 使用 `event: product` 和全局 `id`，正式消息事件携带 MessageView，可按序直接合并正文、来源和产物元数据。`resync` 要求重新读取 snapshot。浏览器断开后，服务继续拥有 Execution。
 
-> 规划一篇旅行攻略。先生成任务 Graph，并解释各节点会使用什么资源，暂时不要执行。
+Run 列表和步骤采用 `SequencePage`：`items`、`total`、`next_before_sequence`、`latest_sequence` 与 `read_sequence`。`before_sequence` 为排他上界，省略时读取最新页；`latest_sequence` 不受当前页限制，`next_before_sequence` 为 null 表示没有更早记录。两处不再使用 offset cursor。GraphRun、节点及其他资源继续遵循各自分页合同。`ResourceDetail` 在目录摘要字段外包含 `metadata`、`configuration`、`input_schema`、`output_schema`、`content` 和 `files`。
 
-每个任务有独立的 conversation；同一任务内的连续消息会保留上下文。每次发送创建一个真实 Execution，按同一会话的顺序执行。新的任务使用独立会话，复用空间配置。
+产品事件到达后，客户端在已加载的历史范围内，按有界消息页重读可能变化的责任、报告与产物投影。每条消息按产品读取序列合并，新缓存代次丢弃旧请求结果，历史消息的归属状态与清理标记随服务事实更新。重读保留聊天阅读锚点、草稿和右侧选择。
 
-发送后，消息在中央阅读区域展开，输入区固定在底部。没有 Graph 时不显示空画布、编排版本或缩放按钮。简单问题可以一直保持对话视图；复杂目标由 Weave Agent 搜索能力、提交和执行 Graph。网页不会在浏览器里拼出虚构计划。
+错误返回稳定 code、message、request_id 和 retryable，revision 冲突还返回 current_revision。客户端应保留当前输入并刷新对象，确认后再发起新操作。
 
-提交失败时保留输入内容供重试；如果会话已经创建成功，重试继续使用该会话。Shift+Enter 换行，输入法组合过程中的 Enter 不提交。
-
-### 查看与调整编排
-
-真实 Graph 出现后，主区域展开横向画布，对话移入底部浮层。「展开对话」查看完整历史，「收起对话」恢复浮层；切换视图保留当前输入。收起画布后可以继续使用完整对话，通过「展开编排」恢复。
-
-节点直接呈现任务摘要、模型角色或实际模型、配置的 Tools／Skills 和上游依赖步骤。彩色标题区用于组织阅读，执行状态单独标注；配置的资源不等于本次实际调用记录。Graph 可平移、缩放、适配视口，节点详情显示输入、输出、指令、结构和错误。
-
-节点可点击或用 Enter、空格打开详情，Esc 关闭详情。「询问节点详情」把问题填入并聚焦可见的对话输入框，需要发送后才执行。没有单节点播放、拖线编辑或删除按钮；编排调整仍通过对话完成。例如：
-
-> 在文案生成后增加事实核查，保留之前的检索步骤，生成新版本后先说明变化。
-
-Graph 版本与执行结果分开显示。切换旧版本不会套用当前版本的节点状态，也不会重新执行计划。
-
-确认满意后，点击保存空间编排的按钮。空间保存这份 Graph 的精确版本引用；之后的新任务沿用默认指令和该编排，描述这次的新目标或输入即可。修改 Graph 后需要再次保存才会替换空间引用；历史执行保留原版本。「空间设置」可以查看或取消保存的引用。
-
-### 跟踪执行与审阅结果
-
-网页接收真实 SSE 事件，展示当前执行、Graph 节点状态和过程记录；连接中断时重新读取持久化状态。最终答案、节点产物和错误以服务器记录为准。只有存在可取消的真实执行时，才显示停止操作；取消通过后端 ExecutionService 完成。
-
-结果可以继续通过对话修改。需要调用外部发布工具时，必须先在工作区配置真实工具和对应凭据；安装 Web 不会自动获得小红书发布或联网搜索能力。
-
-### 处理审批
-
-需要审批的调用会展示后端保存的工具名、参数、具体动作和截止时间。选择批准或拒绝后，服务继续或终止该动作；浏览器不提交替代工具结果。
-
-空间里的“发布前确认”是任务要求，不能替代宿主的强制审批策略。若需要每次执行 Graph 前均审批，可在 `.env` 中显式配置：
-
-```dotenv
-PLEIAD_APPROVAL_TOOL_CODES=["weave.execute_graph"]
-```
-
-配置后重启服务。审批固定具体 Graph 版本；等待期间生成的新版本不会替换已批准的计划。当前 SDK 接入仅支持主 Run 的可恢复审批；Graph 节点包含需审批的工具时仍会明确拒绝执行，这个已有边界没有被 Web 绕过。
-
-## 5. 模型、Tools 与 Skills
-
-「资源库」使用「模型」「Tools」「Skills」分类展示后端实际加载的模型角色和能力目录。可以搜索、查看资源详情，点击「配置位置」查看并复制实际工作区和能力清单路径。资源库不显示当前空间的配置项。
-
-当前资源库提供目录查询，没有在线编辑模型、连接 MCP、安装 Tool 或 Skill 的按钮。模型密钥、MCP 连接、Tool 注册和 Skill 包安装继续使用已有工作区配置方式；网页中的空间设置只保存默认指令、资源偏好和编排引用，不提供素材上传入口。偏好资源用于指导编排，**不代表权限隔离或强制白名单**。
-
-| 配置 | 位置 | 生效时间 |
-| --- | --- | --- |
-| 模型、endpoint、密钥、沙箱、审批策略 | 仓库根目录 `.env` | 重启服务后 |
-| 能力名称、代码、描述 | `workspace/capabilities.yaml` | 下一次能力读取或绑定 |
-| Tool 脚本与 Schema | `workspace/tools/<name>.py` 与 `<name>.json` | 下一次能力读取或绑定 |
-| Skill 内容与附属文件 | `workspace/skills/<code>/SKILL.md` 等 | 下一次能力读取或绑定 |
-| 默认指令、偏好能力、默认编排引用 | 网页内空间设置 | 下一次提交请求 |
-
-新能力必须满足已有 SDK loader 的校验。目录无效会明确报错；不会静默使用旧配置。正在执行的 Run 保留已选资源引用。详细格式见 [工作区说明](../workspace/README.md) 和 [仓库能力配置](../README.md#能力配置)。
-
-资源搜索按名称、代码和描述筛选，显示匹配数量与无结果提示。切换分类时更新列表，目录读取失败可重试。复制路径成功和失败分别显示反馈；复制操作不修改配置文件。MCP 配置方式见 [默认能力接入指南](weave-capabilities.md)。
-
-网页控件的逐项检查、修复和验证命令见 [交互验收记录](weave-web-interactions.md)。
-
-## 6. 开发时运行前端
-
-一个终端在仓库根目录运行后端：
-
-```bash
-uv run --project apps/weave --frozen pleiad serve
-```
-
-另一个终端运行 Vite：
+## 开发与排查
 
 ```bash
 npm --prefix apps/weave/web run dev
-```
-
-打开 Vite 输出的地址。开发服务器把 `/v1` 与 `/healthz` 代理到 `127.0.0.1:8000`。正式使用时直接打开后端的 8000 端口，不必再启动 Vite。
-
-前端修改后验证并重新构建：
-
-```bash
-npm --prefix apps/weave/web run typecheck
 npm --prefix apps/weave/web run format:check
+npm --prefix apps/weave/web run typecheck
 npm --prefix apps/weave/web test
 npm --prefix apps/weave/web run build
 ```
 
-## 7. 常见启动问题
+Vite 开发服务器将 `/v1`、`/healthz` 和 `/readyz` 代理到本地 HTTP Owner。安装分发包使用打包静态资源。构建产物位于 `apps/weave/src/web/assets/`。
 
-| 现象 | 检查与处理 |
-| --- | --- |
-| 首页返回 503，提示 Web assets missing | 执行 `npm ci` 和 `npm run build`，然后重启 `pleiad serve`；检查是否在仓库根目录启动 |
-| 首次启动提示模型或沙箱配置无效 | 检查根目录 `.env`，尤其是密钥、协议和完整真实镜像 digest；不要把占位值当配置 |
-| `workspace_in_use` | 另一个服务或 TUI 正拥有同一工作区；回到原终端正常退出，或使用不同工作区；不要直接删除锁文件 |
-| 页面显示后端不可达 | 确认服务终端没有退出，访问 `/healthz`；开发模式确认后端仍在 8000 端口 |
-| 模型返回认证、额度或超时错误 | 查看页面中的实际错误和 `workspace/runtime/logs/`；检查提供商配置与额度，修复后重新提交 |
-| Graph 一直未出现 | 当前任务可能直接回答，或模型尚未提交计划；可明确要求先生成 Graph；不要把无图误判为前端断开 |
-| `sandbox.runtime.unavailable` | OCI 命令行工具或引擎不可用；先运行 `docker info` / `podman info`，检查服务和连接目标，详见下方说明 |
-| `sandbox.cleanup.failed` | 未能确认本次沙箱容器已清理；查看诊断详情及服务日志，确认引擎连接和容器状态，不能据此认定引擎未启动 |
-| `sandbox.execution.failed` | 展开诊断信息，检查容器创建或状态查询的具体错误；若为 `bind source path does not exist`，确认工作区在容器虚拟机的共享范围内 |
-| 审批过期或返回 409 | 刷新任务状态，确认请求是否已处理、取消或过期；不可重新批准已经失效的动作 |
-| 空间保存返回版本冲突 | 刷新空间设置，再基于最新版本修改；服务不会覆盖其他页面刚保存的配置 |
+页面提示静态资源缺失时重新运行 build 并重启服务。readyz 返回 503 时检查 Owner 锁、恢复日志与配置。工具失败时检查实际错误码、Docker/Podman 连通性、镜像 digest 和挂载目录。MCP 失败时检查明确启用的连接、宿主凭据变量和允许工具列表。
 
-### 沙箱连接失败与清理失败
+确定性测试、浏览器交互验收、真实模型、远程 MCP 和 OCI 引擎验收分别记录。
 
-`sandbox.runtime.unavailable` 表示选择的 OCI 运行时当前不可用。SDK 在创建容器前执行只读的 `docker info` 或 `podman info` 检查；命令不存在、引擎未启动、连接错误或检查超时，都会在创建容器前报错。此时按上方步骤恢复引擎连接，并确认配置的镜像已在该引擎中存在。Weave 不自动启动容器引擎、拉取镜像，也不回退到宿主执行。
-
-`sandbox.cleanup.failed` 表示无法确认本次执行拥有的容器已经清理，可能发生在容器创建或执行之后。它不等同于“Docker 未启动”。展开页面中的诊断详情，结合 `workspace/runtime/logs/` 检查原始错误和清理错误；本次修复会保留两者，避免清理错误覆盖前面的失败原因。恢复引擎连接后，应先确认该次执行的容器状态，再重新提交任务；不要直接批量清理容器。
-
-更新代码后重新构建前端，并重启 `pleiad serve`，使服务使用本次修复。模型和沙箱配置的修改也需要重启。确认 `docker info` 或 `podman info` 通过后，在网页重新发送请求；新请求会创建新的执行记录，原失败记录仍保留，不会自动恢复或改成成功。
-
-## 8. 数据与接口
-
-空间和会话元数据写入 `workspace/runtime/workspaces/workspaces.sqlite3`；执行与事件仍在 `runtime/executions/`，Graph、节点产物、SDK 消息历史继续使用原存储目录。刷新页面或正常重启不会把它们变成浏览器缓存中的临时数据。
-
-网页接口：
-
-| 接口 | 用途 |
-| --- | --- |
-| `GET /v1/spaces` | 列出空间 |
-| `POST /v1/spaces/draft` | 通过模型整理或修改未保存的空间草稿 |
-| `POST /v1/spaces` | 确认草稿并创建空间 |
-| `PATCH /v1/spaces/{space_id}` | 按 `expected_revision` 保存空间配置 |
-| `DELETE /v1/spaces/{space_id}` | 删除空间及其任务的持久化数据 |
-| `GET /v1/spaces/{space_id}/saved-graph` | 只读返回保存引用的精确 GraphSpec，不执行编排 |
-| `GET/POST /v1/spaces/{space_id}/conversations` | 列出、创建独立任务会话 |
-| `GET /v1/resources` | 查询真实模型与能力元数据，不返回密钥 |
-| `GET /v1/conversations/{conversation_id}/messages` | 读取 SDK 公开会话历史 |
-| `DELETE /v1/conversations/{conversation_id}` | 删除单个任务及其持久化数据 |
-| `GET /v1/executions?conversation_id=…` | 查询该会话的持久化执行记录 |
-| `GET /v1/executions/{execution_id}/details` | 查询该执行的 Graph、节点尝试及产物 |
-| `GET /v1/executions/{execution_id}/stream` | SSE 在线事件与持久事件回放 |
-
-空间草稿请求示例：
-
-```json
-{
-  "messages": [{"role": "user", "content": "建立旅行内容写作空间，保留引用来源。"}],
-  "draft": null
-}
-```
-
-返回 `{ "reply": "…", "draft": {…} }`。后续请求发送完整草稿对话和当前可编辑的 `draft`；消息角色只允许 `user`、`assistant`，最后一条必须是用户消息。草稿对话最多 40 条、累计 48000 字符，单条最多 16000 字符。该请求只生成配置，没有保存副作用，断连会取消模型调用。
-
-确认创建的请求体为：
-
-```json
-{
-  "name": "旅行内容写作",
-  "instructions": "引用资料保留来源。定稿前由我确认。",
-  "preferred_tool_codes": [],
-  "preferred_skill_codes": []
-}
-```
-
-`POST /v1/spaces` 已移除旧 `saved_graph` 字段，传入该字段（即使为 `null`）会返回 422，不保留兼容入口。`PATCH /v1/spaces/{space_id}` 继续要求 `expected_revision`，可保存来自该空间真实任务的 `saved_graph` 精确版本引用。创建和更新都会验证资源偏好是否存在于当前目录。
-
-`instructions` 对应界面中的「默认指令」，可省略或使用空字符串。每次提交 Execution 都读取服务端空间配置，空白指令不进入任务上下文。`GET /v1/spaces/{space_id}/saved-graph` 不读取最新版本来替代保存的旧版；空间不存在、没有保存编排或引用版本不存在时返回 404，不创建任务或调用模型。
-
-草稿输入校验失败返回 422，模型调用或输出校验失败返回 502，超时返回 504；错误正文不返回提供商密钥或原始内部异常。详细诊断保留在服务日志。
-
-两个删除接口成功时返回 `{ "deleted": true }`，目标不存在返回 404；执行尚未结束，或存在涉及其他任务的关联执行时返回 409。删除与执行提交、任务创建、空间设置更新互斥，校验冲突后不会先删除一部分记录。存储故障仍会报错，可修复后重试；它不是跨多个存储文件的统一数据库事务。
-
-提交、取消和审批继续使用已有 `/v1/executions` 接口，完整字段以运行服务的 `/docs` 为准。草稿断连取消只适用于未保存的配置生成；关闭任务页或其 SSE 连接不会取消持久化 Execution。
-
-## 9. 当前实现与验证
-
-当前前端按工作区、空间、任务组织页面，顶栏导航替代旧侧栏；空间创建使用 `SpaceCreator` 与 `/v1/spaces/draft`，Graph 使用横向节点与底部对话浮层。后端草稿流程位于 `application/space_drafts.py`，继续调用 Pleiad 的公共 Agent、Runner 和模型接口，不另建执行引擎。
-
-### 删除任务与空间：2026-11-05
-
-前端入口、确认与请求状态在 `web/src/App.tsx`、`DeleteConfirmation.tsx`，后端清理由 `application/service.py` 统一处理。会话历史通过 Pleiad 的 `ShortMemory.clear()` 清理，Weave 不直接修改 SDK 的表。
-
-| 实际执行的命令 | 结果 |
-| --- | --- |
-| `npm --prefix apps/weave/web run typecheck` | 通过 |
-| `npm --prefix apps/weave/web run format:check` | 通过 |
-| `npm --prefix apps/weave/web test` | 91 passed，8 files |
-| `npm --prefix apps/weave/web run build` | 通过，已更新随包网页资源 |
-| `uv run --directory apps/weave --frozen ruff format --check .` | 84 files already formatted |
-| `uv run --directory apps/weave --frozen ruff check .` | 通过 |
-| `uv run --directory apps/weave --frozen mypy` | 86 source files，通过 |
-| `uv run --directory apps/weave --frozen pytest -q -m 'not packaging and not oci and not provider_e2e'` | 229 passed，2 deselected |
-| `uv run --directory packages/pleiad --frozen ruff format --check .` | 210 files already formatted |
-| `uv run --directory packages/pleiad --frozen ruff check .` | 通过 |
-| `uv run --directory packages/pleiad --frozen mypy` | 214 source files，通过 |
-| `uv run --directory packages/pleiad --frozen pytest -q -m 'not oci and not provider_e2e'` | 378 passed，2 deselected；1 条既有 DashScope 弃用警告 |
-| `uv run --project apps/weave --frozen lint-imports --config .importlinter` | 7 kept，0 broken |
-| `UV_OFFLINE=1 uv run --directory apps/weave --frozen pytest tests/packaging -q` | 最终构建后的 wheel、sdist 与干净安装：2 passed |
-| `git diff --check` | 通过 |
-
-回归覆盖持久化删除与重启、跨任务数据隔离、保存与复用 Graph、活动执行与父子任务冲突、共享 Graph 尚未落盘的竞争窗口、提交被连续取消时的锁和调度，以及前端迟到请求不恢复已删除任务。SDK 清空测试也覆盖 SQLite 删除失败时事务回滚。
-
-独立浏览器在临时工作区连接真实 HTTP 服务，模型边界使用脚本化响应。桌面与 390 × 844 窄屏完成任务删除取消、顶栏删除、列表删除入口、执行中返回 409、空间删除失败后重试、删除成功后的导航及刷新检查。重启临时服务后，已删空间仍不存在，另一空间、任务和两条消息仍可读取。两个预期的 409 网络错误均显示在确认框内。此轮没有运行真实模型、OCI 或外部发布服务。
-
-验证结束后清理临时工作区、脚本、截图、日志和测试缓存，关闭独立测试浏览器；保留正式网页资源、操作文档和原有用户数据。
-
-### 默认指令与空间设置改造：本轮验证
-
-2026-11-04，本轮自动检查结果：
-
-| 命令 | 结果 |
-| --- | --- |
-| `uv run --directory apps/weave --frozen ruff format --check .` | 84 files already formatted |
-| `uv run --directory apps/weave --frozen ruff check .` | 通过 |
-| `uv run --directory apps/weave --frozen mypy` | 86 source files，通过 |
-| `uv run --directory apps/weave --frozen pytest -q -m 'not packaging and not oci and not provider_e2e'` | 222 passed，2 deselected |
-| `uv run --directory packages/pleiad --frozen ruff format --check .` | 210 files already formatted |
-| `uv run --directory packages/pleiad --frozen ruff check .` | 通过 |
-| `uv run --directory packages/pleiad --frozen mypy` | 214 source files，通过 |
-| `uv run --directory packages/pleiad --frozen pytest -q -m 'not oci and not provider_e2e'` | 375 passed，2 deselected；1 条既有 DashScope 弃用警告 |
-| `uv run --project apps/weave --frozen lint-imports --config .importlinter` | 7 kept，0 broken |
-| `npm --prefix apps/weave/web run typecheck` | 通过 |
-| `npm --prefix apps/weave/web run format:check` | 通过 |
-| `npm --prefix apps/weave/web test` | 87 passed，8 files |
-| `npm --prefix apps/weave/web run build` | 通过，已生成静态资源 |
-| `uv run --directory apps/weave --frozen pytest tests/packaging -q` | 最后一次前端构建后运行：2 passed in 14.24s |
-
-本轮已使用独立浏览器验收最终构建。实际 `127.0.0.1:8000` 服务重新启动后，确认空间切换菜单、独立设置和资源库导航可用；此部分只读，没有修改真实用户数据或调用模型。
-
-在 `127.0.0.1:18081` 的隔离内存 HTTP fixture 中，完成清空默认指令后保存并重新读取、资源选择与移除后保存、资源库分类搜索与详情、配置位置、返回原设置，以及保存 Graph 的精确版本预览、节点指令查看和缩放适配。1487 × 1058 桌面与 390 × 844 窄屏均无横向溢出，窄屏保存按钮可滚动到达。实际服务与 fixture 页面控制台均为 0 errors、0 warnings。
-
-这些检查验证页面与 HTTP 交互，未调用真实模型、OCI 或外部发布服务；历史联调不计入本轮验收。逐项结果和截图见 [本轮交互验收](weave-web-interactions.md#本轮浏览器验收)。
-
-### 历史验证：上一次顶栏与空间草稿改造
-
-以下结果与截图属于前一轮，不代替本轮重新验证。
-
-2026-11-04，上一次顶栏与空间草稿改造执行过以下检查：
-
-| 命令 | 结果 |
-| --- | --- |
-| `npm --prefix apps/weave/web run typecheck` | 通过 |
-| `npm --prefix apps/weave/web run format:check` | 通过 |
-| `npm --prefix apps/weave/web test` | 73 passed，6 files |
-| `npm --prefix apps/weave/web run build` | TypeScript／Vite 构建通过，已生成静态资源 |
-| `uv run --directory apps/weave --frozen ruff format --check .` | 83 files already formatted |
-| `uv run --directory apps/weave --frozen ruff check .` | 通过 |
-| `uv run --directory apps/weave --frozen mypy` | 85 source files，通过 |
-| `uv run --directory apps/weave --frozen pytest -q -m 'not packaging and not oci and not provider_e2e'` | 202 passed，2 deselected |
-| `uv run --project apps/weave --frozen lint-imports --config .importlinter` | 7 kept，0 broken |
-| `uv run --directory apps/weave --frozen pytest tests/packaging -q` | 最终静态资源构建后复跑：2 passed |
-
-后端确定性测试使用真实 SDK Runner、应用服务与存储，只在模型提供商边界提供受控响应。覆盖草稿多轮修改、确认前不持久化、无工具写入权限、断连取消、超时、旧字段拒绝和资源目录校验。
-
-当时使用独立 Playwright 控制真实 Chrome 验证了完整前端操作路径：创建草稿、编辑预览、确认进入新空间、发送首条消息、无 Graph 对话、搜索与键盘导航、节点详情和询问、展开／收起对话、结果与 JSON 下载、切换执行记录、保存空间编排。手动缩放从 100% 到 120% 后，即使后端详情轮询返回变化，画布仍保持用户视口。
-
-390 × 844 窄屏下检查了工作区、新任务、创建空间、搜索、Graph 与节点详情；创建预览可编辑，底部确认按钮可点击，页面宽度为 390px，没有横向溢出。该验证是桌面 Chrome 的窄视口检查，不是手机实机验收。
-
-上述浏览器任务、Graph、执行和审批数据由 `127.0.0.1:18081` 的隔离 HTTP fixture 提供，验证真实页面渲染、交互与 HTTP 请求，不涉及真实提供商、OCI 或外部发布。
-
-另外，本机实际服务 `127.0.0.1:8000` 的 `POST /v1/spaces/draft` 已通过直接请求和当时的浏览器页面验证：返回 200，模型生成的名称和规则显示在可编辑预览中。关闭后仍保留原有两个空间，没有确认创建，也没有启动产品任务或 OCI。这验证了前端、草稿接口与实际模型的连接，不等同于新版任务执行的完整端到端验证。
-
-浏览器步骤和截图见 [交互验收](weave-web-interactions.md)；最终视觉核对见 [design-qa.md](../apps/weave/web/design-qa.md)。当时没有重新验证真实 OCI 或外部发布服务。
-
-## 10. 历史验证记录（本轮界面改造前）
-
-以下命令结果、真实模型与 OCI 联调、截图属于前一版的历史验证，不代替本轮界面和空间草稿接口验收。
-
-
-前端源码在 `apps/weave/web/`，静态资源随 `pleiad_weave.web` 发行；空间接口在 `api/routes/workspaces.py`，会话、执行详情与 SSE 在 `api/routes/workbench.py`。两者继续使用现有 ExecutionService 和 Pleiad Runner。
-
-2026-11-04 在 macOS 上完成以下验证：
-
-| 实际执行的命令 | 结果 |
-| --- | --- |
-| `npm --prefix apps/weave/web run format:check` | 通过 |
-| `npm --prefix apps/weave/web run typecheck` | 通过 |
-| `npm --prefix apps/weave/web test` | 14 passed |
-| `npm --prefix apps/weave/web run build` | 通过，已生成随包资源 |
-| `uv run --directory apps/weave --frozen ruff format --check .` | 82 files 通过 |
-| `uv run --directory apps/weave --frozen ruff check .` | 通过 |
-| `uv run --directory apps/weave --frozen mypy` | 84 files 通过 |
-| `uv run --directory apps/weave --frozen pytest -q -m 'not packaging and not oci and not provider_e2e'` | 186 passed，2 deselected |
-| `uv run --directory packages/pleiad --frozen ruff format --check .` | 210 files 通过 |
-| `uv run --directory packages/pleiad --frozen ruff check .` | 通过 |
-| `uv run --directory packages/pleiad --frozen mypy` | 214 files 通过 |
-| `uv run --directory packages/pleiad --frozen pytest -q -m 'not oci and not provider_e2e'` | 371 passed，2 deselected；1 条既有 DashScope 弃用警告 |
-| `uv run --project apps/weave --frozen lint-imports --config .importlinter` | 7 kept，0 broken |
-| `uv run --directory apps/weave --frozen pytest -q -m packaging tests/packaging` | 2 passed；最后一次前端构建后重新检查 wheel、sdist 与干净安装 |
-| `uv lock --project apps/weave --check` / `uv lock --project packages/pleiad --check` | 通过 |
-| `uv run --project apps/weave --frozen pre-commit run --files <本次变更和新增文件> --show-diff-on-failure` | 所有适用的 pre-commit hooks 通过；无符号链接供 check-symlinks 检查 |
-| `git diff --check` | 通过 |
-
-真实浏览器验收使用独立临时工作区和本机配置的 DeepSeek 模型：创建空间 → 对话生成两节点 Graph → 保存版本 → 独立任务复用 → 对话修改节点指令 → 审批 → 两节点成功 → 查看真实输入输出 → 下载节点 JSON。下载内容与服务器持久产物一致；刷新和服务重启后空间、任务及历史仍可读取。审批以 `waiting_approval → resume_queued → resumed` 的实际记录核验，不以模型回复中的叙述作为审批事实。
-
-联调修复了 DeepSeek Chat Completions 的结构化输出协议适配：发送 JSON mode 和 Schema 指令，Runtime 继续校验结构，不在请求失败后切换模型或伪造成功。协议依据见 [DeepSeek JSON Output](https://api-docs.deepseek.com/guides/json_mode/)。
-
-首次网页联调时，本机 Docker 未运行，涉及内置 `command` 的尝试失败；当时的成功链路使用文本节点。后续已恢复容器引擎并补充真实 OCI 和网页命令调用验证，见下节。**外部发布工具、移动设备实机、Podman 及其他模型提供商未验证。** 测试未调用发布服务，也未修改既有用户工作区数据或 `.env`。
-
-下面是实际联调页面，不是静态演示数据：
-
-![第一版 Weave Web 的对话、Graph 和节点输入输出](assets/weave-web-v1.jpg)
-
-### 2026-11-04：沙箱异常与界面文案修复
-
-本次排查确认：故障发生时 Docker CLI 已安装，但 Colima 的 `default` 实例处于 `Stopped`，Docker 当前连接的 socket 不存在。已执行 `colima start` 启动现有实例；Colima 自动将 Docker context 切换为 `colima`，`docker info` 返回 Server 29.5.2，既有固定镜像可用。
-
-本次修改增加容器创建前的引擎连接检查，在执行与清理同时失败时保留原始原因；创建和状态查询错误附带最多 2 KiB 的运行时 stderr。执行预算耗尽后不会继续以无限超时启动命令，容器清理保留独立预算。网页显示中文操作建议和可展开的诊断信息。静态文案统一为空间、任务、编排、执行和审批等术语，保留具体参数和版本信息。
-
-最终代码通过上表中的确定性测试、Ruff、严格 mypy、前端检查、导入边界及打包测试。另完成：
-
-- 引擎停止时，真实 `OciSandbox.execute()` 返回 `sandbox.runtime.unavailable`，未进入容器创建与清理。
-- 使用 Weave 虚拟环境的 Python 执行 `-m pytest -q -m oci packages/pleiad/tests/sandbox/test_oci_real.py -k docker --basetemp <用户主目录下新建的临时目录>/pytest`：**1 passed，1 deselected**。`PLEIAD_DOCKER_SANDBOX_IMAGE` 来自现有 `Settings.sandbox_image`。覆盖非 root 身份、只读工作区、可写临时目录、退出码、stdout/stderr 与清理。
-- 初次真实 OCI 检查遇到未共享临时目录；改用用户主目录后，发现原测试的只读写入探针污染 stderr。现只屏蔽该探针的预期报错，其余断言和权限策略均保留，复测通过。
-- 在独立工作区用真实 DeepSeek 模型完成“网页对话 → command → Docker → 工具结果 → 执行完成”，命令返回 `sandbox-ready`、退出码 0；加载最终代码重启服务后，历史仍可读取，新请求返回 `sandbox-ready-final`、退出码 0。容器清理后，SDK 所有权标签下未发现残留容器。
-
-文案修订后的资源页：
-
-![空间与资源页面](assets/weave-web-copy.jpg)
-
-真实沙箱调用结果：
-
-![网页对话中的 Docker 命令执行结果](assets/weave-web-sandbox-verified.jpg)
+交互行为矩阵见 [Web 交互说明](weave-web-interactions.md)，浏览器验收和截图更新步骤见 [前端验收指南](../apps/weave/web/design-qa.md)。

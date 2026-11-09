@@ -1100,17 +1100,21 @@ dependencies = [
 [package.optional-dependencies]
 anthropic = [
     { name = "anthropic" },
+    { name = "httpx", extra = ["socks"] },
 ]
 deepseek = [
     { name = "anthropic" },
+    { name = "httpx", extra = ["socks"] },
     { name = "openai" },
 ]
 glm = [
     { name = "anthropic" },
+    { name = "httpx", extra = ["socks"] },
     { name = "zai-sdk" },
 ]
 kimi = [
     { name = "anthropic" },
+    { name = "httpx", extra = ["socks"] },
     { name = "openai" },
 ]
 mcp = [
@@ -1118,6 +1122,7 @@ mcp = [
 ]
 minimax = [
     { name = "anthropic" },
+    { name = "httpx", extra = ["socks"] },
     { name = "openai" },
 ]
 models = [
@@ -1140,6 +1145,7 @@ qwen = [
     { name = "aiohttp" },
     { name = "anthropic" },
     { name = "dashscope" },
+    { name = "httpx", extra = ["socks"] },
 ]
 
 [package.dev-dependencies]
@@ -1174,8 +1180,14 @@ requires-dist = [
     { name = "dashscope", marker = "extra == 'models'", specifier = ">=1.27.4,<2.0.0" },
     { name = "dashscope", marker = "extra == 'qwen'", specifier = ">=1.27.4,<2.0.0" },
     { name = "fastmcp", marker = "extra == 'mcp'", specifier = ">=4.0.4,<5.0.0" },
+    { name = "httpx", extras = ["socks"], marker = "extra == 'anthropic'", specifier = ">=0.28.1,<1.0.0" },
+    { name = "httpx", extras = ["socks"], marker = "extra == 'deepseek'", specifier = ">=0.28.1,<1.0.0" },
+    { name = "httpx", extras = ["socks"], marker = "extra == 'glm'", specifier = ">=0.28.1,<1.0.0" },
+    { name = "httpx", extras = ["socks"], marker = "extra == 'kimi'", specifier = ">=0.28.1,<1.0.0" },
+    { name = "httpx", extras = ["socks"], marker = "extra == 'minimax'", specifier = ">=0.28.1,<1.0.0" },
     { name = "httpx", extras = ["socks"], marker = "extra == 'models'", specifier = ">=0.28.1,<1.0.0" },
     { name = "httpx", extras = ["socks"], marker = "extra == 'openai'", specifier = ">=0.28.1,<1.0.0" },
+    { name = "httpx", extras = ["socks"], marker = "extra == 'qwen'", specifier = ">=0.28.1,<1.0.0" },
     { name = "jsonschema", specifier = ">=4.25.0,<5.0.0" },
     { name = "langfuse", marker = "extra == 'observability'", specifier = ">=4.15.4,<5.0.0" },
     { name = "openai", marker = "extra == 'deepseek'", specifier = ">=2.0.0,<3.0.0" },

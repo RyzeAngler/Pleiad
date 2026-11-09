@@ -7,9 +7,9 @@ from pleiad.messages.message import Message
 
 
 class MessageEvent(AgentRuntimeEvent):
-    """Correlate one message lifecycle with its Memory Turn."""
+    """Correlate one message lifecycle with its Memory ModelStep."""
 
-    turn_id: str = Field(min_length=1)
+    step_id: str = Field(min_length=1)
 
 
 class MessageStartedEvent(MessageEvent):

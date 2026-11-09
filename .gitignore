@@ -23,6 +23,9 @@ target/
 .pleiad-workspace/
 .env
 !.env.example
+workspace/runtime-v2/
+workspace/work/
+workspace/scratch/
 workspace/runtime/logs/*
 !workspace/runtime/logs/.gitkeep
 workspace/runtime/memory/*

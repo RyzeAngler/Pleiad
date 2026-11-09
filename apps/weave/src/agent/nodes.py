@@ -1,121 +1,107 @@
 import asyncio
+import json
 from datetime import UTC, datetime
-from uuid import uuid4
 
 from pleiad.contracts import JsonObject
-from pleiad.errors.base import PleiadError, SystemFault
+from pleiad.errors.base import PleiadError
+from pleiad.messages.message import ToolMessage
 from pleiad.orchestration.graph.node import Node
 from pleiad.orchestration.graph.state import NodeResult, NodeStatus
+from pleiad.runtime.checkpoint import ResumeDecision
+from pleiad.sessions.checkpoint import RunCheckpoint
 
 from pleiad_weave.application.errors import ErrorRecord
-from pleiad_weave.application.events import ExecutionEventPublisher
-from pleiad_weave.infrastructure.storage.artifacts import ArtifactStore
-from pleiad_weave.infrastructure.storage.models import NodeRunRecord
-from pleiad_weave.infrastructure.storage.repository import NodeRunRepository
+from pleiad_weave.infrastructure.storage.product_content import ProductContent
+from pleiad_weave.infrastructure.storage.product_details import NodeAttempt, ProductDetails, ToolResultDetail
 
 
 class NodeExecutor:
-    """Persist product attempts around the SDK's executable Node boundary."""
+    """Persist attempts around SDK Node.run without replacing its lifecycle."""
 
-    def __init__(
-        self,
-        execution_id: str,
-        graph_id: str,
-        revision: int,
-        records: NodeRunRepository,
-        artifacts: ArtifactStore,
-        publisher: ExecutionEventPublisher,
-        *,
-        graph_run_id: str,
-    ) -> None:
-        """Bind product identity without replacing SDK Agent execution."""
+    def __init__(self, execution_id: str, graph_run_id: str, details: ProductDetails, content: ProductContent) -> None:
+        """Bind one real GraphRun to the common product journal and content owner."""
         self.execution_id = execution_id
         self.graph_run_id = graph_run_id
-        self.graph_id = graph_id
-        self.revision = revision
-        self.records = records
-        self.artifacts = artifacts
-        self.publisher = publisher
+        self.details = details
+        self.content = content
 
-    async def execute(self, node: Node, input_value: JsonObject) -> NodeResult:
-        """Save the attempt lifecycle and delegate all execution to Node.run."""
-        record = NodeRunRecord(
-            node_run_id=uuid4().hex,
-            graph_run_id=self.graph_run_id,
-            execution_id=self.execution_id,
-            graph_id=self.graph_id,
-            graph_revision=self.revision,
+    async def execute(
+        self,
+        node: Node,
+        input_value: JsonObject,
+        *,
+        checkpoint: RunCheckpoint | None = None,
+        decisions: tuple[ResumeDecision, ...] = (),
+    ) -> NodeResult:
+        """Start or resume the original attempt and persist actual source identities."""
+        record = await asyncio.to_thread(
+            self.details.begin_node,
+            self.execution_id,
+            self.graph_run_id,
             node_id=node.node_id,
-            input=input_value,
+            input_value=input_value,
             model_name=None if node.agent is None else node.agent.model.model,
-            status=NodeStatus.RUNNING,
+            checkpoint=checkpoint,
         )
-        await asyncio.to_thread(self.records.save, record)
         try:
-            result = await node.run(input_value)
-            artifact = (
-                None if result.output is None else await asyncio.to_thread(self.artifacts.put_json, result.output)
-            )
+            result = await node.run(input_value, checkpoint=checkpoint, decisions=decisions)
+            artifact_ids: tuple[str, ...] = ()
+            if result.output is not None:
+                payload = json.dumps(result.output, ensure_ascii=False, sort_keys=True, allow_nan=False).encode("utf-8")
+                artifact = await asyncio.to_thread(
+                    self.content.install_artifact,
+                    self.execution_id,
+                    artifact_id=f"node:{record.node_attempt_id}:output",
+                    name=f"node-{record.node_attempt_id}.json",
+                    mime="application/json",
+                    payload=payload,
+                    graph_run_id=self.graph_run_id,
+                    node_attempt_id=record.node_attempt_id,
+                )
+                artifact_ids = (artifact.artifact_id,)
+            if result.session_id is not None:
+                state = await node.session_store.snapshot(result.session_id)
+                for entry in state.messages:
+                    if isinstance(entry.message, ToolMessage):
+                        await asyncio.to_thread(
+                            self.details.save_tool_result,
+                            ToolResultDetail(
+                                tool_result_id=f"{entry.run_id}/{entry.message.message_id}",
+                                execution_id=self.execution_id,
+                                run_id=entry.run_id,
+                                step_id=entry.step_id,
+                                call_id=entry.message.tool_call_id,
+                                text=entry.message.content,
+                            ),
+                        )
             error = None
             if result.error_code is not None and result.error_message is not None and result.error_type is not None:
                 error = ErrorRecord(code=result.error_code, message=result.error_message, type=result.error_type)
-            await asyncio.to_thread(
-                self.records.save,
-                record.model_copy(
-                    update={
-                        "status": result.status,
-                        "sdk_run_id": result.node_run_id if node.agent is not None else None,
-                        "sdk_run_status": result.run_status,
-                        "usage": result.usage,
-                        "artifact_id": None if artifact is None else artifact.artifact_id,
-                        "error": error,
-                        "finished_at": datetime.now(UTC),
-                    }
-                ),
+            updated = record.model_copy(
+                update={
+                    "status": result.status,
+                    "sdk_run_id": result.node_run_id if node.agent is not None else None,
+                    "session_id": result.session_id,
+                    "usage": result.usage,
+                    "checkpoint": result.checkpoint,
+                    "result": result.model_copy(update={"output": None}),
+                    "artifact_ids": artifact_ids,
+                    "error": error,
+                    "finished_at": None if result.status is NodeStatus.PAUSED else datetime.now(UTC),
+                }
             )
+            await asyncio.to_thread(self.details.save_node, updated)
+            return result
         except asyncio.CancelledError:
-            await asyncio.to_thread(
-                self.records.save,
-                record.model_copy(update={"status": NodeStatus.UNKNOWN, "finished_at": datetime.now(UTC)}),
-            )
+            await self.fail_attempt(record, None)
             raise
-        except PleiadError as failure:
-            await asyncio.to_thread(
-                self.records.save,
-                record.model_copy(
-                    update={
-                        "status": NodeStatus.UNKNOWN,
-                        "error": ErrorRecord.from_exception(failure),
-                        "finished_at": datetime.now(UTC),
-                    }
-                ),
-            )
+        except PleiadError as error:
+            await self.fail_attempt(record, ErrorRecord.from_exception(error))
             raise
-        except Exception as failure:
-            fault = SystemFault("weave.node_unexpected", f"Node execution failed: {type(failure).__name__}.")
-            await asyncio.to_thread(
-                self.records.save,
-                record.model_copy(
-                    update={
-                        "status": NodeStatus.UNKNOWN,
-                        "error": ErrorRecord.from_exception(fault),
-                        "finished_at": datetime.now(UTC),
-                    }
-                ),
-            )
-            raise fault from failure
-        await self.publisher.emit(
-            self.execution_id,
-            "node.completed",
-            {
-                "node_id": node.node_id,
-                "node_run_id": record.node_run_id,
-                "graph_run_id": record.graph_run_id,
-                "sdk_run_id": result.node_run_id if node.agent is not None else None,
-                "sdk_run_status": None if result.run_status is None else result.run_status.value,
-                "usage": None if result.usage is None else result.usage.model_dump(mode="json"),
-                "node_status": result.status.value,
-                "error": None if error is None else error.model_dump(mode="json"),
-            },
+
+    async def fail_attempt(self, record: NodeAttempt, error: ErrorRecord | None) -> None:
+        """Preserve unknown attempt status when its owning SDK call cannot confirm it."""
+        await asyncio.to_thread(
+            self.details.save_node,
+            record.model_copy(update={"status": NodeStatus.UNKNOWN, "error": error, "finished_at": datetime.now(UTC)}),
         )
-        return result

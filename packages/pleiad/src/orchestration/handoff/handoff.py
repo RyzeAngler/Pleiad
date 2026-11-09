@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from pleiad.agent.agent import Agent
 from pleiad.orchestration.errors import OrchestrationConfigurationError
 from pleiad.runtime.execution.control import RuntimeHandoffBinding
-from pleiad.runtime.execution.runner import Runner
+from pleiad.runtime.runner import Runner
 
 
 @dataclass(frozen=True, slots=True)

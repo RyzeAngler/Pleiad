@@ -3,20 +3,22 @@ from pathlib import Path
 
 import pytest
 from opentelemetry.sdk.metrics import MeterProvider
-from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+from opentelemetry.sdk.metrics.export import Histogram, InMemoryMetricReader, Sum
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import StatusCode
 
 from pleiad.contracts import JsonObject
-from pleiad.memory.short_memory import ShortMemory
 from pleiad.models.openai.response import OpenAIUsage
 from pleiad.observability.tracing import Observability
-from pleiad.runtime.config import RunConfig
+from pleiad.runtime.limits import RunLimits
+from pleiad.sessions.backends.in_memory import InMemorySessionStore
+from pleiad.sessions.input import InputEnvelope
+from pleiad.sessions.session import Session
 from pleiad.tools.base import ToolOutput
 from pleiad.tools.contracts import ToolContext
-from tests.runtime.execution.test_runner import (
+from tests.fakes.runtime import (
     BlockingOpenAIModel,
     FakeAnthropicModel,
     FakeOpenAIModel,
@@ -25,6 +27,7 @@ from tests.runtime.execution.test_runner import (
     text_batch,
     tool_batch,
 )
+from tests.runtime_support import run_agent
 
 
 def make_runtime_observability(exporter: InMemorySpanExporter) -> Observability:
@@ -34,21 +37,75 @@ def make_runtime_observability(exporter: InMemorySpanExporter) -> Observability:
     return Observability(tracer_provider=provider)
 
 
-def test_runner_emits_one_generation_in_the_real_run_turn_model_chain(tmp_path: Path) -> None:
+def test_runner_emits_one_generation_in_the_real_run_step_model_chain(tmp_path: Path) -> None:
     model = FakeOpenAIModel((text_batch("done", "response-1"),))
     runner, agent = make_runner(model, tmp_path)
     exporter = InMemorySpanExporter()
     runner.observability = make_runtime_observability(exporter)
     runner.loop.observability = runner.observability
 
-    result = asyncio.run(runner.run(agent, "hello", memory=ShortMemory.in_memory("observed-run"), config=RunConfig()))
+    result = asyncio.run(
+        run_agent(runner, agent, "hello", session=Session("observed-run", InMemorySessionStore()), limits=RunLimits())
+    )
 
-    assert result.status.value == "succeeded"
+    assert result.state.value == "succeeded"
     names = [span.name for span in exporter.get_finished_spans()]
     assert names.count("pleiad.run") == 1
-    assert names.count("pleiad.turn") == 1
+    assert names.count("pleiad.step") == 1
     assert names.count("pleiad.model.generate") == 1
     assert "pleiad.tool.execute" not in names
+
+
+def test_input_consumption_metrics_count_one_accepted_input_across_retries_and_multiple_steps(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        async def echo(context: ToolContext, arguments: JsonObject) -> ToolOutput:
+            return arguments
+
+        reader = InMemoryMetricReader()
+        provider = MeterProvider(metric_readers=[reader])
+        runner, agent = make_runner(
+            FakeOpenAIModel((tool_batch("call"), text_batch("finished", "response"))), tmp_path, echo
+        )
+        runner.observability = Observability(meter_provider=provider)
+        runner.loop.observability = runner.observability
+        session = Session("observed-input", InMemorySessionStore())
+        envelope = InputEnvelope(input_id="request", kind="user", source="private-source", content="Use the tool")
+        await session.enqueue(envelope)
+        assert (await session.enqueue(envelope)).duplicate
+        try:
+            handle = await runner.start(
+                agent,
+                session=session,
+                invocation_id="invoke",
+                input_ids=(envelope.input_id,),
+                input_mode="batch",
+                limits=RunLimits(),
+            )
+            async with handle:
+                result = await handle.result()
+            assert result.state.value == "succeeded"
+            assert len((await session.store.snapshot(session.session_id)).steps) == 2
+            data = reader.get_metrics_data()
+            assert data is not None
+            metrics = {
+                metric.name: metric.data
+                for resource in data.resource_metrics
+                for scope in resource.scope_metrics
+                for metric in scope.metrics
+            }
+            consumed = metrics["pleiad.input.consumed"]
+            assert isinstance(consumed, Sum)
+            assert consumed.data_points[0].value == 1
+            assert consumed.data_points[0].attributes == {"kind": "user"}
+            latency = metrics["pleiad.input.consumption.latency"]
+            assert isinstance(latency, Histogram)
+            assert latency.data_points[0].count == 1
+            assert latency.data_points[0].sum >= 0
+        finally:
+            await runner.aclose()
+            provider.shutdown()
+
+    asyncio.run(scenario())
 
 
 def test_runner_places_tool_execution_beside_model_generations(tmp_path: Path) -> None:
@@ -63,13 +120,15 @@ def test_runner_places_tool_execution_beside_model_generations(tmp_path: Path) -
     runner.loop.observability = runner.observability
 
     result = asyncio.run(
-        runner.run(agent, "use the Tool", memory=ShortMemory.in_memory("observed-tool"), config=RunConfig())
+        run_agent(
+            runner, agent, "use the Tool", session=Session("observed-tool", InMemorySessionStore()), limits=RunLimits()
+        )
     )
 
-    assert result.status.value == "succeeded"
+    assert result.state.value == "succeeded"
     spans = exporter.get_finished_spans()
     names = [span.name for span in spans]
-    assert names.count("pleiad.turn") == 2
+    assert names.count("pleiad.step") == 2
     assert names.count("pleiad.model.generate") == 2
     assert names.count("pleiad.tool.execute") == 1
     model_spans = [span for span in spans if span.name == "pleiad.model.generate"]
@@ -89,10 +148,12 @@ def test_runner_emits_one_generation_for_anthropic_model(tmp_path: Path) -> None
     runner.loop.observability = runner.observability
 
     result = asyncio.run(
-        runner.run(agent, "hello", memory=ShortMemory.in_memory("observed-anthropic"), config=RunConfig())
+        run_agent(
+            runner, agent, "hello", session=Session("observed-anthropic", InMemorySessionStore()), limits=RunLimits()
+        )
     )
 
-    assert result.status.value == "succeeded"
+    assert result.state.value == "succeeded"
     model_spans = [span for span in exporter.get_finished_spans() if span.name == "pleiad.model.generate"]
     assert len(model_spans) == 1
     assert model_spans[0].attributes is not None
@@ -115,10 +176,14 @@ def test_concurrent_runners_keep_run_and_generation_traces_separate(tmp_path: Pa
 
     async def scenario() -> None:
         results = await asyncio.gather(
-            runner_a.run(agent_a, "a", memory=ShortMemory.in_memory("observed-a"), config=RunConfig()),
-            runner_b.run(agent_b, "b", memory=ShortMemory.in_memory("observed-b"), config=RunConfig()),
+            run_agent(
+                runner_a, agent_a, "a", session=Session("observed-a", InMemorySessionStore()), limits=RunLimits()
+            ),
+            run_agent(
+                runner_b, agent_b, "b", session=Session("observed-b", InMemorySessionStore()), limits=RunLimits()
+            ),
         )
-        assert all(result.status.value == "succeeded" for result in results)
+        assert all(result.state.value == "succeeded" for result in results)
 
     asyncio.run(scenario())
 
@@ -141,7 +206,13 @@ def test_runner_ends_model_span_when_streaming_run_is_cancelled(tmp_path: Path) 
         runner.loop.observability = runner.observability
 
         task = asyncio.create_task(
-            runner.run(agent, "keep streaming", memory=ShortMemory.in_memory("observed-cancel"), config=RunConfig())
+            run_agent(
+                runner,
+                agent,
+                "keep streaming",
+                session=Session("observed-cancel", InMemorySessionStore()),
+                limits=RunLimits(),
+            )
         )
         await model.started.wait()
         task.cancel()
@@ -186,14 +257,15 @@ def test_runner_telemetry_distinguishes_missing_usage_from_measured_zero(tmp_pat
     runner.loop.observability = runner.observability
     try:
         result = asyncio.run(
-            runner.run(
+            run_agent(
+                runner,
                 agent,
                 "answer",
-                memory=ShortMemory.in_memory("telemetry-usage"),
-                config=RunConfig(),
+                session=Session("telemetry-usage", InMemorySessionStore()),
+                limits=RunLimits(),
             )
         )
-        assert result.status.value == "succeeded"
+        assert result.state.value == "succeeded"
         span = next(item for item in exporter.get_finished_spans() if item.name == "pleiad.model.generate")
         assert span.attributes is not None
         data = reader.get_metrics_data()

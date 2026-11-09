@@ -1,4 +1,5 @@
 import asyncio
+import json
 from collections.abc import Awaitable, Callable
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
@@ -7,8 +8,13 @@ import pytest
 
 from pleiad.sandbox.backends.oci import OciSandbox
 from pleiad.sandbox.backends.process import ProcessResult
-from pleiad.sandbox.errors import SandboxCleanupError, SandboxExecutionError, SandboxUnavailableError
-from pleiad.sandbox.models import SandboxRequest
+from pleiad.sandbox.errors import (
+    SandboxCancelledError,
+    SandboxCleanupError,
+    SandboxExecutionError,
+    SandboxUnavailableError,
+)
+from pleiad.sandbox.models import SandboxReceipt, SandboxRequest
 from pleiad.sandbox.policy import SandboxPolicy
 
 
@@ -495,4 +501,171 @@ def test_oci_unavailable_does_not_run_a_host_fallback(monkeypatch: pytest.Monkey
             await sandbox.execute(make_request(tmp_path))
 
     monkeypatch.setattr("pleiad.sandbox.backends.oci.shutil.which", lambda runtime: None)
+    asyncio.run(scenario())
+
+
+class ActionDaemon:
+    """Persist fake external daemon identities independently of SDK backend instances."""
+
+    def __init__(self) -> None:
+        self.exists = False
+        self.exit_code: int | None = None
+        self.name = ""
+        self.labels: dict[str, str] = {}
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.commands: list[tuple[str, ...]] = []
+
+    async def __call__(
+        self, command: tuple[str, ...], *, stdin: bytes | None, output_limit: int, timeout_seconds: float | None
+    ) -> ProcessResult:
+        self.commands.append(command)
+        if command[1] == "info":
+            return ProcessResult(0, b"", b"", False, 0.0, False)
+        if command[1] == "create":
+            if self.exists:
+                return ProcessResult(1, b"", b"Container name is already in use", False, 0.0, False)
+            self.exists = True
+            self.name = command[command.index("--name") + 1]
+            self.labels = dict(
+                command[index + 1].split("=", 1) for index, value in enumerate(command) if value == "--label"
+            )
+            return ProcessResult(0, b"accepted-container", b"", False, 0.0, False)
+        if command[1] == "start":
+            self.started.set()
+            await self.release.wait()
+            return ProcessResult(0, b"completed", b"", False, 0.0, False)
+        if command[1] == "container":
+            token = self.labels.get("com.pleiad.sandbox.owner.request")
+            matches = self.exists and f"label=com.pleiad.sandbox.owner.request={token}" in command
+            return ProcessResult(0, b"accepted-container" if matches else b"", b"", False, 0.0, False)
+        if command[1] == "rm":
+            self.exists = False
+            self.release.set()
+            return ProcessResult(0, b"accepted-container", b"", False, 0.0, False)
+        if command[1] == "inspect":
+            if not self.exists:
+                return ProcessResult(1, b"", b"No such container", False, 0.0, False)
+            if "{{json .}}" in command:
+                payload = {
+                    "Id": "accepted-container",
+                    "Name": f"/{self.name}",
+                    "Config": {"Labels": self.labels},
+                    "State": {
+                        "Status": "exited"
+                        if self.exit_code is not None
+                        else ("running" if self.started.is_set() else "created"),
+                        "Running": self.exit_code is None and self.started.is_set(),
+                        "ExitCode": 0 if self.exit_code is None else self.exit_code,
+                    },
+                }
+                return ProcessResult(0, json.dumps(payload).encode(), b"", False, 0.0, False)
+            return ProcessResult(0, b"0", b"", False, 0.0, False)
+        raise AssertionError(f"Unexpected daemon request {command}")
+
+
+def test_oci_acceptance_is_queryable_before_execution_and_duplicate_admission_cannot_remove_it() -> None:
+    """Stable backend identity survives a new SDK instance and failed duplicate creation."""
+
+    async def scenario() -> None:
+        daemon = ActionDaemon()
+        backend = OciSandbox(process_executor=daemon)
+        accepted = asyncio.Event()
+        release = asyncio.Event()
+        receipts: list[SandboxReceipt] = []
+
+        async def on_accept(receipt: SandboxReceipt) -> None:
+            receipts.append(receipt)
+            accepted.set()
+            await release.wait()
+
+        request = SandboxRequest(
+            cwd=PurePosixPath("/"),
+            policy=make_policy(),
+            shell_command="printf accepted",
+            operation_id="durable-operation",
+        )
+        async with asyncio.TaskGroup() as group:
+            task = group.create_task(backend.execute(request, on_accept=on_accept))
+            await asyncio.wait_for(accepted.wait(), timeout=3)
+            assert not daemon.started.is_set()
+            restarted = OciSandbox(process_executor=daemon)
+            observed = await restarted.query("durable-operation")
+            assert observed.state == "created" and observed.receipt == receipts[0]
+            assert receipts[0].request_digest == request.digest()
+            with pytest.raises(SandboxExecutionError, match="already in use"):
+                await restarted.execute(request, on_accept=on_accept)
+            assert daemon.exists
+            assert not any(command[1] == "rm" for command in daemon.commands)
+            stopped = await restarted.stop(receipts[0])
+            assert stopped.state == "cancelled" and stopped.evidence == {"container_removed": True}
+            missing = await restarted.query("durable-operation")
+            assert missing.state == "unknown" and missing.receipt is None
+            assert (await restarted.stop(receipts[0])).state == "unknown"
+            task.cancel()
+            with pytest.raises(SandboxCancelledError) as cancelled:
+                await task
+            assert cancelled.value.confirmed_stop
+
+    asyncio.run(scenario())
+
+
+def test_oci_query_cannot_adopt_a_foreign_container_at_the_stable_operation_name() -> None:
+    """Host recovery verifies backend ownership before it exposes an accepted receipt."""
+
+    async def scenario() -> None:
+        daemon = ActionDaemon()
+        backend = OciSandbox(process_executor=daemon)
+        accepted = asyncio.Event()
+        release = asyncio.Event()
+
+        async def on_accept(receipt: SandboxReceipt) -> None:
+            accepted.set()
+            await release.wait()
+
+        request = SandboxRequest(
+            cwd=PurePosixPath("/"), policy=make_policy(), shell_command="true", operation_id="owned"
+        )
+        async with asyncio.TaskGroup() as group:
+            task = group.create_task(backend.execute(request, on_accept=on_accept))
+            await asyncio.wait_for(accepted.wait(), timeout=3)
+            daemon.labels["com.pleiad.sandbox.owner"] = "foreign"
+            observation = await OciSandbox(process_executor=daemon).query("owned")
+            assert observation.state == "unknown" and observation.receipt is None
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("exit_code", [0, 23], ids=["successful-process", "failed-process"])
+def test_stop_retains_known_exit_facts_when_the_process_finishes_after_the_callers_query(exit_code: int) -> None:
+    """Cancellation cleanup preserves a process outcome confirmed by stop's fresh inspection."""
+
+    async def scenario() -> None:
+        daemon = ActionDaemon()
+        accepted: list[SandboxReceipt] = []
+
+        async def on_accept(receipt: SandboxReceipt) -> None:
+            accepted.append(receipt)
+
+        request = SandboxRequest(
+            cwd=PurePosixPath("/"), policy=make_policy(), shell_command="work", operation_id="finishes-before-stop"
+        )
+        async with asyncio.TaskGroup() as group:
+            task = group.create_task(OciSandbox(process_executor=daemon).execute(request, on_accept=on_accept))
+            await asyncio.wait_for(daemon.started.wait(), timeout=3)
+            recovery = OciSandbox(process_executor=daemon)
+            previous = await recovery.query("finishes-before-stop")
+            assert previous.state == "running" and previous.receipt == accepted[0]
+            daemon.exit_code = exit_code
+            stopped = await recovery.stop(accepted[0])
+            assert stopped.state == ("succeeded" if exit_code == 0 else "failed")
+            assert stopped.exit_code == exit_code and stopped.receipt == accepted[0]
+            assert stopped.evidence == {"container_removed": True} and not daemon.exists
+            task.cancel()
+            with pytest.raises(SandboxCancelledError):
+                await task
+
     asyncio.run(scenario())

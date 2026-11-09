@@ -2,9 +2,13 @@ from enum import StrEnum
 
 from pydantic import Field, model_validator
 
+from pleiad.budgets import BudgetCheckpoint
 from pleiad.contracts import ContractModel, JsonObject
 from pleiad.errors.base import ErrorType
-from pleiad.runtime.lifecycle.state import RunStatus, RunUsage
+from pleiad.runtime.checkpoint import ResumeDecision
+from pleiad.sessions.checkpoint import RunCheckpoint
+from pleiad.sessions.records import RunStatus
+from pleiad.sessions.usage import RunUsage
 
 
 class GraphStatus(StrEnum):
@@ -28,6 +32,7 @@ class NodeStatus(StrEnum):
     SKIPPED = "skipped"
     UNKNOWN = "unknown"
     PAUSED = "paused"
+    CANCELLED = "cancelled"
 
 
 class NodeResult(ContractModel):
@@ -35,6 +40,7 @@ class NodeResult(ContractModel):
 
     node_id: str = Field(min_length=1)
     node_run_id: str = Field(min_length=1)
+    session_id: str | None = Field(default=None, min_length=1)
     status: NodeStatus
     output: JsonObject | None = None
     error_code: str | None = Field(default=None, min_length=1)
@@ -42,6 +48,7 @@ class NodeResult(ContractModel):
     error_type: ErrorType | None = None
     run_status: RunStatus | None = None
     usage: RunUsage | None = None
+    checkpoint: RunCheckpoint | None = None
 
     @model_validator(mode="after")
     def validate_error(self) -> "NodeResult":
@@ -53,6 +60,15 @@ class NodeResult(ContractModel):
             raise ValueError("NodeResult only carries business errors")
         if (self.run_status is None) != (self.usage is None):
             raise ValueError("Agent Node results require both Run status and usage")
+        if (self.status is NodeStatus.PAUSED) != (self.checkpoint is not None):
+            raise ValueError("Paused nodes require exactly one Run checkpoint")
+        if self.checkpoint is not None and (
+            self.checkpoint.run_id != self.node_run_id
+            or self.checkpoint.session_id != self.session_id
+            or self.run_status is not RunStatus.PAUSED
+            or self.usage != self.checkpoint.usage
+        ):
+            raise ValueError("Paused node identities, state, and usage must match their checkpoint")
         return self
 
 
@@ -63,12 +79,23 @@ class NodeState(ContractModel):
     status: NodeStatus = NodeStatus.PENDING
     attempt: int = Field(default=0, ge=0)
     node_run_id: str | None = Field(default=None, min_length=1)
+    session_id: str | None = Field(default=None, min_length=1)
+    input_value: JsonObject | None = None
+    reservation_id: str | None = Field(default=None, min_length=1)
     output: JsonObject | None = None
     error_code: str | None = Field(default=None, min_length=1)
     error_message: str | None = Field(default=None, min_length=1)
     error_type: ErrorType | None = None
     run_status: RunStatus | None = None
     usage: RunUsage | None = None
+    checkpoint: RunCheckpoint | None = None
+
+
+class NodeResume(ContractModel):
+    """Supply host decisions for one paused Agent node."""
+
+    node_id: str = Field(min_length=1)
+    decisions: tuple[ResumeDecision, ...] = ()
 
 
 class BranchDecision(ContractModel):
@@ -88,6 +115,7 @@ class GraphState(ContractModel):
     child_usage: RunUsage | None
     branch_decisions: tuple[BranchDecision, ...] = ()
     scheduling_position: int = Field(default=0, ge=0)
+    budget: BudgetCheckpoint | None = None
 
 
 class GraphResult(ContractModel):

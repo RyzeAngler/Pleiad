@@ -8,7 +8,7 @@ from pleiad.contracts import JsonSchema, SkillRef, ToolRef, freeze_json_object
 from pleiad.models.anthropic.client import AnthropicModelClient
 from pleiad.models.openai.client import OpenAIModelClient
 from pleiad.schemas import validate_json_schema
-from pleiad.tools.contracts import DEFAULT_TOOL_CODES, default_tool_refs
+from pleiad.tools.contracts import default_tool_refs
 
 SUPPORTED_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema"
 
@@ -20,7 +20,7 @@ class Agent:
     name: str
     model: OpenAIModelClient | AnthropicModelClient
     prompt: str
-    tools: tuple[ToolRef, ...] = ()
+    tools: tuple[ToolRef, ...] = field(default_factory=default_tool_refs)
     skills: tuple[SkillRef, ...] = ()
     output_schema: JsonSchema | None = None
     policy_hints: AgentPolicyHints = field(default_factory=AgentPolicyHints)
@@ -44,9 +44,6 @@ class Agent:
         if self.output_schema is not None:
             validate_output_schema(self.output_schema)
             object.__setattr__(self, "output_schema", freeze_json_object(self.output_schema))
-        default_codes = frozenset(DEFAULT_TOOL_CODES)
-        merged_tools = default_tool_refs() + tuple(ref for ref in self.tools if ref.code not in default_codes)
-        object.__setattr__(self, "tools", merged_tools)
 
 
 def validate_output_schema(schema: JsonSchema) -> None:

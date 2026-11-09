@@ -1,3 +1,4 @@
+import asyncio
 from enum import StrEnum
 
 from pleiad.errors.base import BusinessError, SystemFault
@@ -24,8 +25,25 @@ class ToolErrorCode(StrEnum):
     RUNTIME_UNAVAILABLE = "tool.runtime.unavailable"
 
 
+class ToolCancelledError(asyncio.CancelledError):
+    """Carry the backend's actual stop confirmation while preserving cancellation propagation."""
+
+    def __init__(self, *, confirmed_stop: bool) -> None:
+        """Retain concrete cleanup certainty from the executing backend."""
+        super().__init__("The Tool execution was cancelled")
+        self.confirmed_stop = confirmed_stop
+
+
 class ToolError(BusinessError):
     """Base class for expected Tool failures."""
+
+
+class BackgroundNotAcceptedError(ToolError):
+    """Report a confirmed rejection before a background backend accepted work."""
+
+    def __init__(self, message: str = "The backend did not accept this background action.") -> None:
+        """Keep backend rejection distinct from an accepted action's later outcome."""
+        super().__init__("tool.background.not_accepted", message)
 
 
 class ToolSystemFault(SystemFault):

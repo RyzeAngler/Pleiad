@@ -19,7 +19,8 @@ source_modules =
 forbidden_modules =
     pleiad.runtime.execution.loop
     pleiad.runtime.execution.model_input
-    pleiad.runtime.execution.control
+    pleiad.runtime.execution.control_state
+    pleiad.runtime.operations
 allow_indirect_imports = true
 
 [importlinter:weave_uses_runner]
@@ -39,7 +40,7 @@ source_modules =
 forbidden_modules =
     pleiad.tools
     pleiad.skills
-    pleiad.memory
+    pleiad.sessions
     pleiad.agent
     pleiad.orchestration
     pleiad.runtime
@@ -53,7 +54,7 @@ source_modules =
     pleiad.tools
 forbidden_modules =
     pleiad.skills
-    pleiad.memory
+    pleiad.sessions
     pleiad.agent
     pleiad.orchestration
     pleiad.runtime
@@ -67,18 +68,18 @@ source_modules =
     pleiad.skills
 forbidden_modules =
     pleiad.tools
-    pleiad.memory
+    pleiad.sessions
     pleiad.agent
     pleiad.orchestration
     pleiad.runtime
     pleiad_weave.application
     pleiad_weave.api
 
-[importlinter:memory_is_standalone]
-name = Memory stays independent from execution
+[importlinter:sessions_are_standalone]
+name = Sessions stay independent from execution
 type = forbidden
 source_modules =
-    pleiad.memory
+    pleiad.sessions
 forbidden_modules =
     pleiad.agent
     pleiad.orchestration

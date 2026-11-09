@@ -3,7 +3,7 @@ from uuid import uuid4
 
 from pydantic import Field, TypeAdapter, field_validator, model_validator
 
-from pleiad.contracts import ContractModel, JsonObject
+from pleiad.contracts import ContractModel
 
 
 class TextBlock(ContractModel):
@@ -95,15 +95,3 @@ Message = Annotated[
     Field(discriminator="role"),
 ]
 MESSAGE_ADAPTER: TypeAdapter[Message] = TypeAdapter(Message)
-
-
-def validate_text_blocks(value: tuple[JsonObject, ...]) -> tuple[TextBlock, ...]:
-    """Validate legacy JSON block input at a migration boundary.
-
-    Args:
-        value: JSON objects expected to contain only text blocks.
-
-    Returns:
-        Strict provider-neutral text blocks.
-    """
-    return tuple(TextBlock.model_validate(block) for block in value)

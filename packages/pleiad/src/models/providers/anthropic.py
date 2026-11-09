@@ -3,6 +3,7 @@ from types import TracebackType
 from typing import Protocol, runtime_checkable
 
 from anthropic import AnthropicError, AsyncAnthropic
+from httpx import TimeoutException, TransportError
 from pydantic import SecretStr
 
 from pleiad.contracts import JsonObject, JsonValue
@@ -10,8 +11,10 @@ from pleiad.errors.base import SystemFault
 from pleiad.models.anthropic.request import AnthropicRequest
 from pleiad.models.anthropic.response import AnthropicResponse, AnthropicStreamEvent, parse_event, parse_response
 from pleiad.models.errors import (
+    ModelConnectionError,
     ModelRequestError,
     ModelResponseError,
+    ModelTimeoutError,
     classify_provider_error,
 )
 
@@ -72,6 +75,10 @@ class AnthropicProvider:
             create: Callable[..., Awaitable[object]] = self.client.messages.create
             raw = await create(**payload)
             return parse_response(raw)
+        except TimeoutException as error:
+            raise ModelTimeoutError() from error
+        except TransportError as error:
+            raise ModelConnectionError() from error
         except AnthropicError as error:
             raise classify_provider_error(error) from error
         except (AttributeError, KeyError, TypeError, ValueError) as error:
@@ -101,6 +108,10 @@ class AnthropicProvider:
                 raise ModelResponseError(
                     "The Anthropic stream ended without message_stop.",
                 )
+        except TimeoutException as error:
+            raise ModelTimeoutError() from error
+        except TransportError as error:
+            raise ModelConnectionError() from error
         except AnthropicError as error:
             raise classify_provider_error(error) from error
         except SystemFault:

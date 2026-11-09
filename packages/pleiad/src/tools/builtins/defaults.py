@@ -20,12 +20,16 @@ def install_default_tools(
     skill_roots: Mapping[str, Path] | None = None,
     sandbox: Sandbox,
     sandbox_policy: SandboxPolicy,
+    excluded_workspace_paths: tuple[str, ...] = (),
+    workspace_mask_root: Path | None = None,
 ) -> None:
     """Install the three model-visible SDK Tools into a host registry."""
     binding = FileToolBinding(
         workspace=workspace,
         scratch=scratch,
         skill_roots={} if skill_roots is None else skill_roots,
+        excluded_workspace_paths=excluded_workspace_paths,
+        workspace_mask_root=workspace_mask_root,
     )
     read_descriptor = ToolDescriptor(
         name="read_file",

@@ -43,6 +43,13 @@ def test_distributions_install_without_the_checkout_and_ship_only_product_resour
         names = archive.namelist()
         assert "pleiad/runtime/execution/read_tool_result.py" in names
         assert "pleiad/messages/results.py" in names
+        assert "pleiad/sessions/model_step.py" in names
+        assert not any(name.startswith("pleiad/memory/") for name in names)
+        assert "pleiad/runtime/runner.py" in names
+        assert "pleiad/runtime/handle.py" in names
+        assert "pleiad/runtime/config.py" not in names
+        assert not any(name.startswith("pleiad/orchestration/supervisor/") for name in names)
+        assert "pleiad/budgets.py" in names
         assert "pleiad/orchestration/budget.py" in names
         assert "pleiad/tools/builtins/read_tool_result.py" not in names
     with zipfile.ZipFile(app) as archive:
@@ -62,7 +69,9 @@ def test_distributions_install_without_the_checkout_and_ship_only_product_resour
         assert "pleiad_weave/capabilities/approval.py" in names
         assert "pleiad_weave/memory_cli.py" in names
         assert "pleiad_weave/evaluation.py" in names
-        assert "pleiad_weave/tui/screens/approvals.py" in names
+        assert "pleiad_weave/application/client.py" in names
+        assert "pleiad_weave/tui/screens/approvals.py" not in names
+        assert "pleiad_weave/tui/projection.py" not in names
         assert "pleiad_weave/tui/styles/theme.tcss" in names
         assert "pleiad_weave/web/assets/index.html" in names
         assert any(name.startswith("pleiad_weave/web/assets/assets/") and name.endswith(".js") for name in names)
@@ -100,16 +109,23 @@ import importlib.util
 import asyncio
 import re
 from importlib.resources import files
-from pathlib import Path
 from pleiad.agent.agent import Agent
+from pleiad.models.openai.client import OpenAIModelClient
+from pleiad.models.openai.response import OpenAIStreamChoice, OpenAIStreamChunk, OpenAIStreamDelta
+from pleiad.runtime.runner import Runner
+from pleiad.runtime.handle import RunHandle
+from pleiad.runtime.limits import RunLimits
+from pleiad.runtime.result import RunResult
+from pleiad.sessions.session import Session
+from pleiad.sessions.backends.in_memory import InMemorySessionStore
+from pleiad.sessions.input import InputEnvelope
+from pleiad.sessions.records import RunStatus
+from pleiad.skills.loader import SkillLoader
+from pleiad.tools.registry import ToolRegistry
 from pleiad.schemas import validate_json_schema
-from pleiad.memory.short_memory import ShortMemory
-from pleiad.messages.message import AssistantMessage, ToolCall, ToolMessage, UserMessage
-from pleiad.runtime.execution.read_tool_result import ReadToolResultTool
-from pleiad.tools.contracts import ToolCall as ExecutionToolCall, ToolContext, ToolResult
 from pleiad.tools.runtime import ToolRuntime
 from pleiad_weave.evaluation import EvaluationCase, score_output
-from pleiad_weave.agent.graph import build_graph
+from pleiad_weave.agent.graph_controls import GraphControls
 from pleiad_weave.application.service import ExecutionService
 from pleiad_weave.infrastructure.bootstrap import create_application
 from pleiad_weave.infrastructure.sandbox.images import bundled_python_image_definition
@@ -157,26 +173,35 @@ notice = web.joinpath(font_notices[0].removeprefix("/")).read_text()
 assert "MiSans" in notice and "Xiaomi" in notice
 case = EvaluationCase(case_id="smoke", objective="task", files={"input": "value"}, expected={"n": 1})
 assert score_output(case, '{"n":1}')
-async def read_result() -> None:
-    memory = ShortMemory.in_memory("smoke")
-    turn = await memory.begin("agent", (UserMessage(content="task"),))
-    await memory.complete(turn.turn_id, (
-        AssistantMessage(tool_calls=(ToolCall(id="lookup", name="lookup", arguments="{}"),)),
-        ToolMessage(message_id="result", tool_call_id="lookup", content="original evidence"),
-    ))
-    result = await ToolRuntime().execute(
-        ReadToolResultTool(memory),
-        ExecutionToolCall(call_id="read", tool_code="read_tool_result", arguments={"message_id": "result"}),
-        ToolContext(call_id="read"),
+class InstalledModel(OpenAIModelClient):
+    def __init__(self):
+        self.provider = "installed-fake"
+        self.model = "installed"
+    async def stream(self, request):
+        yield OpenAIStreamChunk(
+            model=self.model,
+            choices=(OpenAIStreamChoice(
+                delta=OpenAIStreamDelta(content="installed reply"), finish_reason="stop"
+            ),),
+        )
+async def run_invocation() -> None:
+    session = Session("installed", InMemorySessionStore())
+    await session.enqueue(InputEnvelope(input_id="input", kind="user", source="package-test", content="task"))
+    runner = Runner(tools=ToolRegistry(), skills=SkillLoader(), tool_runtime=ToolRuntime())
+    agent = Agent(name="installed", prompt="Answer the user.", model=InstalledModel(), tools=())
+    handle = await runner.start(
+        agent, session=session, invocation_id="smoke", input_ids=("input",),
+        input_mode="batch", limits=RunLimits(),
     )
-    assert isinstance(result, ToolResult) and result.ok and result.output is not None
-    assert result.output["content"] == "original evidence"
-    await memory.clear()
-    assert await memory.read() == ()
-    assert await memory.active() is None
-    restarted = await memory.begin("agent", (UserMessage(content="new task"),))
-    assert restarted.sequence == 1
-asyncio.run(read_result())
+    assert isinstance(handle, RunHandle)
+    async with handle:
+        result = await handle.result()
+    assert isinstance(result, RunResult) and result.state is RunStatus.SUCCEEDED
+    assert result.final_output == "installed reply"
+    history = await session.history()
+    assert len(history) == 1 and history[0].completed
+    assert history[0].run_id == result.run_id
+asyncio.run(run_invocation())
 print("clean install verified")
 """
     result = subprocess.run(  # noqa: S603 - Fixed uv/temporary interpreter commands; no user-supplied argv.
@@ -199,4 +224,4 @@ print("clean install verified")
         text=True,
     )
     assert "run" in cli_result.stdout and "serve" in cli_result.stdout and "tui" in cli_result.stdout
-    assert "approval" in cli_result.stdout and "memory" in cli_result.stdout
+    assert "attention" in cli_result.stdout and "execution" in cli_result.stdout and "memory" in cli_result.stdout

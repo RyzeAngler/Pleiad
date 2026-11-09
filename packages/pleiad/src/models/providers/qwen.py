@@ -8,6 +8,7 @@ import aiohttp
 from anthropic import AnthropicError, AsyncAnthropic
 from dashscope.aigc.generation import AioGeneration
 from dashscope.common.error import DashScopeException
+from httpx import TimeoutException, TransportError
 from pydantic import SecretStr
 
 from pleiad.contracts import JsonObject, JsonValue
@@ -22,9 +23,11 @@ from pleiad.models.anthropic.response import (
     parse_response as parse_anthropic_response,
 )
 from pleiad.models.errors import (
+    ModelConnectionError,
     ModelProviderUnavailableError,
     ModelRequestError,
     ModelResponseError,
+    ModelTimeoutError,
     ModelUnsupportedError,
     classify_provider_error,
 )
@@ -136,6 +139,7 @@ class OpenAIProvider:
         for key, value in self.headers.items():
             headers[key] = value
         payload["headers"] = headers
+        emitted = False
         for attempt in range(self.max_retries + 1):
             try:
                 async with aiohttp.ClientSession() as session:
@@ -148,17 +152,24 @@ class OpenAIProvider:
                             )
                         async with aclosing(raw) as stream:
                             async for chunk in stream:
-                                yield parse_stream_chunk(
+                                projected = parse_stream_chunk(
                                     normalize_envelope(chunk, model=self.model, streaming=True),
                                 )
+                                emitted = True
+                                yield projected
                     else:
                         yield parse_response(
                             normalize_envelope(raw, model=self.model, streaming=False),
                         )
                 return
             except (aiohttp.ClientError, DashScopeException, TimeoutError) as error:
-                normalized = classify_provider_error(error)
-                if attempt == self.max_retries:
+                normalized = (
+                    ModelConnectionError()
+                    if isinstance(error, aiohttp.ClientConnectionError | aiohttp.ClientPayloadError)
+                    and not isinstance(error, TimeoutError)
+                    else classify_provider_error(error)
+                )
+                if emitted or attempt == self.max_retries:
                     raise normalized from error
                 await asyncio.sleep(min(0.25 * 2**attempt, 2.0))
 
@@ -198,6 +209,10 @@ class AnthropicProvider:
             create: Callable[..., Awaitable[object]] = self.client.messages.create
             raw = await create(**payload)
             return parse_anthropic_response(raw)
+        except TimeoutException as error:
+            raise ModelTimeoutError() from error
+        except TransportError as error:
+            raise ModelConnectionError() from error
         except AnthropicError as error:
             raise classify_provider_error(error) from error
         except SystemFault:
@@ -232,6 +247,10 @@ class AnthropicProvider:
                 raise ModelResponseError(
                     "The Qwen stream ended without message_stop.",
                 )
+        except TimeoutException as error:
+            raise ModelTimeoutError() from error
+        except TransportError as error:
+            raise ModelConnectionError() from error
         except AnthropicError as error:
             raise classify_provider_error(error) from error
         except SystemFault:

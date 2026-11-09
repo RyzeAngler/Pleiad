@@ -28,26 +28,32 @@ openai = [
 ]
 anthropic = [
     "anthropic>=0.67.0,<1.0.0",
+    "httpx[socks]>=0.28.1,<1.0.0",
 ]
 glm = [
     "anthropic>=0.67.0,<1.0.0",
+    "httpx[socks]>=0.28.1,<1.0.0",
     "zai-sdk>=0.2.3,<0.3.0",
 ]
 qwen = [
     "aiohttp>=3.9.0,<4.0.0",
     "anthropic>=0.67.0,<1.0.0",
     "dashscope>=1.27.4,<2.0.0",
+    "httpx[socks]>=0.28.1,<1.0.0",
 ]
 kimi = [
     "anthropic>=0.67.0,<1.0.0",
+    "httpx[socks]>=0.28.1,<1.0.0",
     "openai>=2.0.0,<3.0.0",
 ]
 deepseek = [
     "anthropic>=0.67.0,<1.0.0",
+    "httpx[socks]>=0.28.1,<1.0.0",
     "openai>=2.0.0,<3.0.0",
 ]
 minimax = [
     "anthropic>=0.67.0,<1.0.0",
+    "httpx[socks]>=0.28.1,<1.0.0",
     "openai>=2.0.0,<3.0.0",
 ]
 models = [

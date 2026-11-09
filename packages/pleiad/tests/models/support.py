@@ -2,6 +2,26 @@ from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import ClassVar
 
+import httpx
+
+
+class InterruptedByteStream(httpx.AsyncByteStream):
+    """Emit actual provider SSE bytes before an injected network transport failure."""
+
+    def __init__(self, content: bytes, failure: httpx.TransportError) -> None:
+        self.content = content
+        self.failure = failure
+        self.closed = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        """Expose a partial response without replaying any received bytes."""
+        yield self.content
+        raise self.failure
+
+    async def aclose(self) -> None:
+        """Record the real HTTP client's response cleanup."""
+        self.closed = True
+
 
 class FakeOpenAIStream:
     """Async stream at the official OpenAI SDK boundary."""

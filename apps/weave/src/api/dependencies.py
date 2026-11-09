@@ -1,17 +1,27 @@
-"""Dependency ports for HTTP adapters."""
-
-from fastapi import Request
+from fastapi import HTTPException, Request
 
 from pleiad_weave.application.service import ExecutionService
 
 
-def require_service(service: ExecutionService | None) -> ExecutionService:
-    """Return a configured service or fail at composition time."""
-    if service is None:
-        raise RuntimeError("Pleiad Weave application service is not configured")
-    return service
-
-
 def get_service(request: Request) -> ExecutionService:
-    """Resolve the application service installed by ``create_app``."""
-    return require_service(getattr(request.app.state, "service", None))
+    """Read the shared application owner installed at composition time."""
+    value: object = getattr(request.app.state, "service", None)
+    if not isinstance(value, ExecutionService):
+        raise RuntimeError("The application service has not been configured")
+    return value
+
+
+def csrf_token(request: Request) -> str:
+    """Read the HTTP-only credential kept outside all model-accessible roots."""
+    value: object = getattr(request.app.state, "csrf_token", None)
+    if not isinstance(value, str):
+        raise RuntimeError("The browser request credential has not been configured")
+    return value
+
+
+def get_writable_service(request: Request) -> ExecutionService:
+    """Require the live workspace owner before accepting a browser mutation."""
+    service = get_service(request)
+    if not service.ready:
+        raise HTTPException(status_code=503, detail="The workspace owner is not ready to accept changes")
+    return service

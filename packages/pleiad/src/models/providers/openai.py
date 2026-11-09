@@ -1,14 +1,17 @@
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import Protocol, runtime_checkable
 
+from httpx import TimeoutException, TransportError
 from openai import AsyncOpenAI, OpenAIError
 from pydantic import SecretStr
 
 from pleiad.contracts import JsonObject, JsonValue
 from pleiad.errors.base import SystemFault
 from pleiad.models.errors import (
+    ModelConnectionError,
     ModelRequestError,
     ModelResponseError,
+    ModelTimeoutError,
     classify_provider_error,
 )
 from pleiad.models.openai.request import OpenAIRequest
@@ -58,6 +61,10 @@ class OpenAIProvider:
             create: Callable[..., Awaitable[object]] = self.client.chat.completions.create
             raw = await create(**payload)
             return parse_response(raw)
+        except TimeoutException as error:
+            raise ModelTimeoutError() from error
+        except TransportError as error:
+            raise ModelConnectionError() from error
         except OpenAIError as error:
             raise classify_provider_error(error) from error
         except (AttributeError, KeyError, TypeError, ValueError) as error:
@@ -89,6 +96,10 @@ class OpenAIProvider:
                 raise ModelResponseError(
                     "The OpenAI stream ended without a finish reason.",
                 )
+        except TimeoutException as error:
+            raise ModelTimeoutError() from error
+        except TransportError as error:
+            raise ModelConnectionError() from error
         except OpenAIError as error:
             raise classify_provider_error(error) from error
         except SystemFault:

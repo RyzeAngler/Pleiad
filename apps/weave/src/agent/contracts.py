@@ -3,6 +3,7 @@ from typing import Literal
 from pleiad.contracts import ContractModel, JsonSchema
 from pleiad.orchestration.graph.edge import Edge
 from pleiad.orchestration.graph.graph import OutputBinding
+from pleiad.runtime.limits import RunLimits
 from pydantic import Field
 
 
@@ -22,6 +23,7 @@ class NodeSpec(ContractModel):
     skill_codes: tuple[str, ...] = ()
     input_schema: JsonSchema = Field(default_factory=object_schema)
     output_schema: JsonSchema = Field(default_factory=object_schema)
+    limits: RunLimits = Field(default_factory=RunLimits)
 
 
 class GraphSpec(ContractModel):

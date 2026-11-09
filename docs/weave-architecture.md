@@ -1,219 +1,105 @@
-# Weave 架构设计
+# Weave 架构
 
-Weave 把用户目标、工作区能力和 [Pleiad 的运行机制](pleiad-architecture.md) 组合成可交互的 Agent 应用。简单任务由主 Agent 直接处理；需要分工和步骤依赖时，主 Agent 提出任务图，Pleiad 校验并执行，Weave 保存过程与结果并呈现给用户。
+Weave 将一个永久主聊天、Space 配置和独立 Execution 组合成单所有者的本地 Agent 产品。主聊天收集用户意图并呈现正式回复，Router 负责分流和汇报，Worker 在独立 Session 中完成工作。运行机制使用 Pleiad 的公开 API。
 
-本文采用 [C4](https://c4model.com/diagrams) 的系统上下文、容器和组件视图，说明这个产品的核心思想与协作关系。
-
-## 1. 核心设计理念
-
-### 围绕目标组织执行
-
-Weave 从用户目标出发选择所需能力。工作区中的 Tool 提供动作，Skill 提供知识；能力元数据用于发现，具体能力在任务节点绑定时确定。
-
-宿主也可以通过 `mcp.json` 配置 HTTP 或 stdio Tool。Weave 负责连接选择、凭据、工具允许列表和
-OAuth 登录策略，使用 Pleiad 公开的 MCP 发现与调用契约，将实际发现的工具加入
-同一能力目录。未启用的连接不进行发现；启用后的失败明确上报。OAuth 状态存放于
-工具工作区之外，交互授权仅由终端登录命令发起。stdio 的每次连接与子进程由 Pleiad 独立管理，
-Weave 只传递宿主配置。持久浏览器状态由独立 HTTP 服务拥有。详见
-[默认能力接入指南](weave-capabilities.md)。
-
-复杂任务的分工以 Graph 表达：节点承担明确任务，边说明步骤依赖和数据传递，结构化输出供下游继续处理。Graph 将模型提出的执行计划变成可以校验、调度和检查结果的结构。任务划分可以随目标变化，执行规则保持一致。
-
-### 产品与通用运行机制各有归属
-
-Weave 决定产品身份、模型角色、能力授权、会话归属和结果呈现。Pleiad 负责模型调用、上下文、工具执行、图调度和资源生命周期。
-
-这种分工让产品能够演进界面、任务策略和存储方式，同时继续使用一套通用 Runtime。图执行和节点执行的产品组件只增加记录与产物关联，实际执行仍由 Pleiad 完成。
-
-### 一个目标对应一个持久化 Execution
-
-Execution 是用户作业的持久化身份，负责状态、结果和过程关联。Pleiad Run 是一次框架调用，GraphRun 和节点尝试记录描述作业内部的执行过程。
-
-这几个层次分别回答“用户任务进行到哪里”“某次调用做了什么”“计划中的节点如何执行”。界面查询和取消围绕同一个 Execution，内部调用不再形成另一套产品作业。
-
-### 用真实执行事实驱动界面
-
-CLI、HTTP、Web 和 TUI 使用同一个应用服务。界面读取执行记录并消费事件，展示模型回复、工具进度和图状态。Web 的静态资源与 HTTP API 同源部署，由同一个 `pleiad serve` 进程拥有工作区。
-
-持久化事件用于回放已经确认的过程，在线增量用于即时交互，Trace 和日志用于诊断。它们各自表达不同事实，最终任务状态由应用服务确认并保存。
-
-## 2. 系统上下文视图（C1）
-
-Weave 面向任务使用者，能力维护者为它提供工作区工具和领域知识。模型服务负责推理；观测后端是可选外部集成。
+## 系统边界
 
 ```mermaid
 flowchart LR
-    User["任务使用者<br/>人物：提出目标、查看进度与结果"]
-    Author["能力维护者<br/>人物：提供工具与领域知识"]
-    Weave["Weave<br/>软件系统：组织并执行用户任务"]
-    Model["模型服务<br/>外部软件系统：推理与计划生成"]
-    Telemetry["观测后端<br/>外部软件系统：可选遥测接收"]
-
-    User -->|"通过 CLI、HTTP 或 TUI 提交任务"| Weave
-    Author -->|"提供工作区 Tool 与 Skill"| Weave
-    Weave -->|"模型协议请求、接收响应"| Model
-    Weave -.->|"显式配置后导出遥测"| Telemetry
+    User[用户] --> Web[Web / CLI / TUI]
+    Web --> HTTP[单一 HTTP Owner]
+    HTTP --> Service[ExecutionService]
+    Service --> Router[短生命周期 Router Run]
+    Service --> Worker[独立 Worker Execution]
+    Router --> SDK[Pleiad Runner + Session]
+    Worker --> SDK
+    Worker --> Graph[GraphControls + NodeExecutor]
+    Graph --> SDK
+    Service --> Product[(product.sqlite3)]
+    SDK --> Sessions[(sessions.sqlite3)]
+    SDK --> Model[模型服务]
+    SDK --> Tools[工具 / MCP / OCI]
 ```
 
-Pleiad 是 Weave 使用的进程内库，在下一层展开。它不作为独立外部服务出现在系统上下文中。
+`packages/pleiad/src/` 安装为 `pleiad`，拥有 Session、ModelStep、Run、工具执行、Handoff、Subagent 和 Graph 调度。`apps/weave/src/` 安装为 `pleiad_weave`，拥有产品策略、授权、记录、内容和界面。`agent/graph.py` 把产品 GraphSpec 绑定为 SDK Graph，`agent/nodes.py` 在真实 Node.run 周围保存尝试和产物。
 
-## 3. 容器视图（C2）
+`pleiad serve` 拥有工作区进程锁、调度任务与恢复。CLI 和 TUI 使用 `WeaveClient` 连接正在运行的 HTTP Owner。多个客户端可以观察同一个产品状态。
 
-Weave 当前以单个 Python 应用进程拥有工作区。CLI、HTTP、TUI 是同一应用的不同入口，复用相同的应用服务；图节点是进程内的异步调用，执行用户脚本时才进入隔离单元。
+## 身份与记录
 
-```mermaid
-flowchart LR
-    User["任务使用者<br/>人物"]
-    Model["模型服务<br/>外部软件系统"]
-
-    subgraph System["Weave 系统边界"]
-        App["Weave 应用<br/>应用容器：Python<br/>交互入口、产品服务、内嵌 Pleiad"]
-        Journal[("执行 Journal<br/>数据存储：SQLite<br/>作业状态与有序事件")]
-        Memory[("会话记忆<br/>数据存储：SQLite<br/>完整交互历史")]
-        Records[("产品记录与产物<br/>数据存储：文件系统<br/>图版本、运行记录、结果与授权事实")]
-        Workspace[("工作区能力与资料<br/>数据存储：文件系统<br/>Tool、Skill 和任务输入")]
-        Sandbox["隔离代码执行<br/>运行单元：临时 OCI 容器"]
-    end
-
-    User -->|"交互入口 / HTTP 或终端"| App
-    App -->|"推理请求 / HTTPS"| Model
-    App -->|"事务提交状态和过程事件"| Journal
-    App -->|"通过 Pleiad 读写会话交互"| Memory
-    App -->|"保存图定义、执行记录与结果"| Records
-    App -->|"发现能力、读取任务资料"| Workspace
-    App -->|"通过 Pleiad 提交受限代码执行"| Sandbox
-    Sandbox -->|"经明确挂载访问工作区"| Workspace
-```
-
-执行 Journal、会话记忆和文件记录按责任分开。作业状态与其事件可以在同一事务提交，其他记录各自保存已经确认的事实；它们不构成跨所有存储的整体事务。
-
-隔离单元由 Pleiad 管理创建、限制和清理。工作区脚本不在应用主进程执行，模型也不能自行选择宿主权限或运行环境。
-
-## 4. 组件视图（C3）
-
-展开 Weave 应用容器。核心组件围绕统一作业、目标规划、能力绑定、执行记录与界面投影组织。
-
-```mermaid
-flowchart TB
-    Journal[("执行 Journal<br/>数据存储：SQLite")]
-    Data[("记忆与产品记录<br/>数据存储：SQLite / 文件系统")]
-    Workspace[("工作区能力与资料<br/>数据存储：文件系统")]
-    Model["模型服务<br/>外部软件系统"]
-    Sandbox["隔离代码执行<br/>运行单元"]
-
-    subgraph App["Weave 应用容器：Python 进程"]
-        Interfaces["交互入口<br/>Python 组件：CLI、HTTP、TUI"]
-        Service["ExecutionService<br/>Python 组件：提交、取消、作业终态"]
-        Planner["WeaveAgent / GraphControls<br/>Python 组件：目标处理与图提案"]
-        Catalog["Capability Catalog<br/>Python 组件：能力发现与绑定"]
-        Graph["GraphRunner / NodeExecutor<br/>Python 组件：图与节点的产品记录"]
-        Storage["产品存储与会话管理<br/>Python 组件：记录、产物、授权事实"]
-        Events["产品事件与投影<br/>Python 组件：持久化关联与在线通知"]
-        Runtime["Pleiad<br/>进程内库：Agent、Runner、Graph 与 Sandbox"]
-    end
-
-    Interfaces -->|"提交与查询作业"| Service
-    Service -->|"持久化状态"| Journal
-    Service -->|"处理用户目标"| Planner
-    Service -->|"确认产品状态事件"| Events
-    Planner -->|"查询、选择能力"| Catalog
-    Catalog -->|"校验当前资源"| Workspace
-    Catalog -->|"提供已校验的能力绑定"| Runtime
-    Planner -->|"运行主 Agent"| Runtime
-    Planner -->|"提交并执行任务图"| Graph
-    Graph -->|"复用图调度与节点执行"| Runtime
-    Planner -->|"保存图版本、访问当前会话"| Storage
-    Graph -->|"保存运行记录、尝试与产物"| Storage
-    Storage -->|"读写产品数据"| Data
-    Runtime -->|"执行事件"| Events
-    Events -->|"保存可回放元数据"| Journal
-    Events -->|"进度与结果投影"| Interfaces
-    Runtime -->|"模型协议 / HTTPS"| Model
-    Runtime -->|"隔离执行请求"| Sandbox
-```
-
-| 组件 | 核心职责 | 设计意义 |
-| --- | --- | --- |
-| 交互入口 | 接收任务、展示进度和结果 | 交互方式变化不改变作业语义 |
-| ExecutionService | 拥有作业任务，确认取消与终态 | 产品只有一条执行生命周期路径 |
-| WeaveAgent / GraphControls | 基于目标和能力提出、选择并执行计划 | 模型规划通过明确的图边界进入执行 |
-| Capability Catalog | 校验工作区能力，提供元数据搜索与绑定 | 能力演进与产品界面解耦 |
-| GraphRunner / NodeExecutor | 关联图、节点尝试和产物 | 产品可理解内部执行过程，机制继续复用 Pleiad |
-| 存储与会话管理 | 保存结果，维护会话和事实访问范围 | 历史、产物与授权具有明确归属 |
-| 产品事件与投影 | 关联执行事实并供界面消费 | 在线展示与持久化回放共享事实来源 |
-
-图表示逻辑协作，相关组件都位于同一应用进程。模型推理、Pleiad 的受控执行和 Weave 的产品记录分别承担自己的职责。
-
-## 5. 从目标到结果
-
-用户提交目标后，ExecutionService 先建立持久化 Execution，再由主 Agent 处理。主 Agent 可以直接回答或调用工具；当任务需要分工时，它查询能力，提出包含节点、依赖和数据映射的 Graph。
-
-图提案经过能力绑定和 Pleiad 校验后成为一个产品版本。执行时，Pleiad 调度依赖已满足的节点，每个节点使用自己的 Agent 和入选能力。节点的结构化结果通过明确映射进入下游，Weave 同时记录节点尝试和产物。
-
-主 Agent 根据实际返回结果形成答案，ExecutionService 确认并保存作业终态。事件让界面观察这条过程，但界面不参与底层调度，也不通过展示文案决定成功。
-
-### 执行身份与记忆
-
-| 概念 | 回答的问题 |
+| 对象 | 身份与责任 |
 | --- | --- |
-| Execution | 用户作业的状态和最终结果是什么？ |
-| Run | 某次 Agent 调用发生了什么？ |
-| Graph 版本与运行记录 | 执行了什么计划，这次执行结果如何？ |
-| Session 与 Memory | 当前会话已经发生过哪些交互？ |
+| Message | 永久主聊天中的正式消息，具有独立 `chat_sequence` |
+| Space | 名称、用途、指令、模型角色和授权范围内的资源选择 |
+| Execution | 唯一持久产品作业，使用 `execution_id` |
+| Session | SDK 交互记录、输入队列、模型消息与检查点 |
+| Run | 一次 SDK invocation，由稳定 `invocation_id` 接受与重试 |
+| ModelStep | 一次模型协议步骤，使用 `step_id` |
+| GraphRun | Execution 内的一次图调用，锁定具体 Graph revision |
+| NodeAttempt | 一个 GraphRun 内的实际节点尝试及其 SDK Run/Session |
+| Report | Worker 的结构化进度、结果或阻塞事实 |
+| Attention | 等待用户回答或批准的持久请求 |
 
-同一会话的主调用串行使用历史，图节点使用独立的单次记忆，避免节点的临时交互混入主会话。业务资料进入当前请求的 Context，用户原始输入仍作为历史事实保存。
+Handoff 继续使用当前 Run、Session 和 Execution。独立生命周期的委派创建 child Execution，并保存 `parent_execution_id`。Graph 节点的执行记录属于当前 Execution。
 
-宿主显式标记的工具先生成 SDK ToolInterruption；默认工具执行策略保持原样。Weave 在同一事务中保存 Execution 的 `WAITING_APPROVAL` 状态、原 RunState、Graph 已结算预算、审批策略和事件。批准或拒绝只提交决策，不接受客户端提供工具结果或替换检查点；恢复继续原 Execution、Run、Session 与 active Turn。等待计入原绝对期限，同一会话的后续作业保持排队。API、CLI 和 TUI 共享 Application Service 的决策入口；打开的审批界面按作业事件移除已失效请求。
+## 输入、路由与汇报
 
-图执行审批在等待前固定实际选择的图版本与定义摘要，并在审批详情中展示。等待期间的新版本不会替换已批准计划；原版本缺失或定义变化时明确失败。Graph Node 的父授权、期限、并发和预算继承由 SDK 完成，Weave 只保存预算快照以跨审批重启保持剩余额度。父调用自身用量与 child_usage 分开报告，当前未定义整个 Execution 的汇总花费上限。审批持久状态中的 graph_budget 为必填可空字段，缺失该字段的历史状态明确拒绝恢复。
+`ProductStore.submit_message` 在一个 SQLite 事务中校验全部目标、引用、附件和队列容量，保存 Message、稳定 origin、Inbox、Delivery 与 InputDisposition。相同客户端键和相同完整请求返回原始收据，修改请求产生冲突。一个多目标请求的接受具有原子性。
 
-重启时保留等待审批的作业，并重新调度尚未认领的 `RESUME_QUEUED`。一旦恢复动作认领为 `RUNNING`，重启后仍明确失败，避免重放无法确认是否完成的副作用。工作区拥有者由进程锁约束，第二服务不能将仍在运行的作业误判为孤立作业；CLI 审批列表只读取持久快照，在线决策通过原服务的 API 或 TUI 完成。当前部署仍是本地单所有者，未增加多用户认证。
+Router 批次由会唤醒的输入触发，并合并此前静默事实。每次尝试保存 invocation、读版本、候选动作和回复。提交时再次检查读版本与对象状态，并原子应用全部动作和正式回复。冲突后使用新 SDK observation 重新判断，最多三次。
 
-已失去拥有者的 GraphRun 同步结算为失败，未确认完成的 Node 尝试结算为未知；保留已确认输出、产物、原 Run 身份和终态，不重放副作用。Node 正常达到 SDK 额度或期限则记录为带原 Run 身份与用量的失败，和进程中断造成的未知状态分别处理。
+歧义请求通过 `request_clarification` 原子创建全局 Attention。回答后按持久来源重新装载原请求、材料与责任，随后派发真实工作。`answer_question` 关联主聊天中已经提交的具体用户 Message。已接受问题的单次回答使用经过持久身份校验的预留额度，普通新请求仍受队列上限限制。
 
-长期事实记忆保留 conversation/user 作用域与版本，项目边界由各工作区的存储目录隔离。本地管理命令提供查看、历史、修改与停用，写入以预期版本和进程锁校验。旧记录的未知来源保持未知；本地管理修订由宿主记录来源和 UTC 时间。模型只保留召回入口，不自行声明来源或修改授权。
+发给 Worker 的输入先进入持久 Delivery，再由服务投递给对应 Session。SDK 的已消费输入和产品的已处理责任分别记录。Worker 使用输入水位、结果证据与明确的 handled input IDs 提交 Report。 SDK 成功后的拒绝候选保存原因并生成有界的宿主修正观察，同一 Execution 与 Session 开启新的 Run 继续交付。先前已消费的输入继续保留责任，自动修正最多三次并共用任务累计预算。`progress` 保存到详情并保持静默。结果与需要用户参与的事实按产品策略唤醒 Router。
 
-## 6. 主要取舍与当前边界
+产品模型输入统一使用有界投影和精确来源引用。Router 按原文字节限制固定批次，Worker 按每个 Session 的未消费投影字节控制投递，并在 SDK ModelStep 边界补入下一批。query_product 与 query_work 按合法归属分页读取完整原文，模型视图压缩保留持久原文与摘要校验。
 
-### Web 工作区、空间与任务
+归还输入保存已完成动作和效果引用，通过 handback barrier 等待原目标集合结算。每轮重新分流具有独立身份，超过两轮升级为 Attention。显式目标消息的责任由对应 Execution 承担。
 
-网页按工作区 → Space → conversation 组织导航。工作区首页列出空间和最近任务，空间卡片显示任务概况，不展示默认指令。顶部搜索跨空间检索任务；空间切换菜单只列空间，当前任务名称独立显示。空间设置是当前空间的独立入口，全局资源库负责目录查询。Space 内先显示新任务输入页，发送后进入对话；只有真实 Graph 产生时才展开画布并把对话移入底部浮层。完整历史仍可展开，浏览器不根据示例图生成虚构节点或执行状态。
+## 状态、控制与预算
 
-Space 是可复用的产品配置，保存名称、可选默认指令、资源偏好、Graph 精确版本引用与配置版本。一个 Space 下可以有多个独立 conversation；界面中的任务会话复用 SDK ShortMemory，同一会话内每条提交仍形成独立的持久化 Execution。Space 和 conversation 元数据不引入另一套可执行作业身份。
+Execution 状态包括 queued、running、waiting_input、waiting_approval、waiting_children、paused、blocked、cancelling、succeeded、failed、cancelled。转换和操作可用性集中在 ProductStore。SpaceView、ExecutionView 与 AttentionView 在同一读事务中计算 `available_actions`、禁用原因和计数。
 
-创建空间分为草稿与确认：`POST /v1/spaces/draft` 接收可见对话和当前手工编辑的配置，通过已配置文本模型和 Pleiad Runner 生成结构化 `reply` 与 `draft`。这次 Run 仅用于配置编写，使用请求内存，不创建 Space、conversation 或持久化 Execution。宿主不授予任何工具权限；资源目录仅提供可选偏好元数据，不能自动安装工具或扩大授权。客户端断连取消请求拥有的 Run，模型失败或输出无效明确返回错误，不截取描述代替模型结果。
+暂停与继续保存实际 SDK RunCheckpoint。澄清答案和审批决定经 Attention resolve 提交，包含 expected revision、稳定请求键和精确 action digest。resolve 在一个事务中保存用户 Message 和决定。用户回答后仍需服从当前暂停与取消意图。
 
-确认时，`POST /v1/spaces` 接收 `name`、`instructions`、`preferred_tool_codes`、`preferred_skill_codes`，校验资源目录后持久化。`instructions` 对应默认指令，可为空；草稿提示要求仅记录用户明确提出的长期偏好，不擅自扩写规则或保存一次性任务要求。旧创建请求的 `saved_graph` 字段已删除，不接受兼容载荷；新空间没有初始 Graph。更新仍使用带 `expected_revision` 的完整配置，可保存该空间任务产生的精确 Graph 版本。模型配置由宿主拥有，不增加空间独立模型凭据。
+Execution 具有总预算。子 Execution 和 Graph 调用按实际剩余额度预留。SDK usage 按 invocation 累计结算，恢复原 Run 延续此前已计费额度。完成父任务前验证输入责任、必要子任务、检查证据和产物。未知外部效果保留为需要核实的事实。
 
-元数据使用 `runtime/workspaces/workspaces.sqlite3` 保存。空间修改按 `expected_revision` 做原子比较更新；服务端在请求提交时读取实际空间记录，将默认指令与偏好快照写入 Execution 的业务 Context，保留原始用户 objective。空白默认指令不注入；之后修改空间不会改变已有 Execution 的快照。
+必需验证使用 `artifact_integrity` 或 `tool_result` 的具体要求，分别绑定交付产物名称，或精确工具代码、参数与预期结果字段。宿主读取实际字节、SDK 工具结果或后台 OperationResult，独立产生 host Verification。Worker 自报的检查保持来源区分。
 
-主 Agent 的系统提示明确本次任务优先于默认指令，具体指令仍由 Pleiad ContextBlock 渲染为用户级上下文。GraphControls 在每次执行时，把当前 objective 和 Execution 的业务上下文绑定到各个 Agent Node 的 `context_blocks`，由 SDK Node 原样交给 Runner。节点无需依赖模型手动复制指令，保存的 GraphSpec、节点业务输入及输入 schema 不变；复用旧编排时也使用本次 Execution 的上下文。权限和审批由独立策略执行，默认指令与偏好资源不授予或限制 SDK 权限。
+启动恢复先检查 Session 和调用收据。已确认结果可以继续结算，安全检查点可以恢复。缺少确认的外部动作经证据核对后进入明确状态。取消等待拥有者完成 SDK 清理和持久结算。
 
-空间设置允许选择或移除优先 Tools／Skills、取消默认编排引用，保存成功后作用于后续提交。离开未保存的编辑需确认；从设置返回原空间或任务时保留对话输入，从资源库可返回进入前的页面。全局资源库仅提供模型／Tools／Skills 分类、搜索、详情、配置位置与复制路径，不包含空间偏好或在线 MCP／模型编辑；凭据、能力包与 MCP 连接仍由宿主配置管理。
+## 持久化与内容
 
-`saved_graph` 只引用该空间真实任务已提交或关联的现存 Graph 版本，不复制图定义。新 Execution 使用提交时快照中的版本作为默认编排；同次 Execution 主动提交的新图可更新其选择。`inspect_graph` 接受可选 `graph_revision`，省略时读最新，指定时只读该版；复用与审批使用精确版本，缺失时明确失败，不自动改用最新版本。
+默认根目录为 `workspace/runtime-v2/`。
 
-`GET /v1/spaces/{space_id}/saved-graph` 为设置页返回保存引用的精确 GraphSpec，只读，不创建 Execution、不调用模型、不运行图。空间不存在、尚未保存或引用版本缺失时返回 404。取消引用不会删除 Graph 历史或执行记录。
+- `product.sqlite3` 保存产品记录、请求收据、引用关系和全局事件序列。
+- `sessions.sqlite3` 使用 SDK SQLite SessionStore 保存交互、输入、步骤、调用和检查点。
+- `content/` 保存以 SHA-256 标识的附件和产物字节，读取时核验大小与摘要。
+- `facts/` 保存带 revision、provenance 和 space/user scope 的本地事实。
+- `logs/` 保存脱敏诊断日志，`scratch/` 提供工具临时内容。
 
-`DELETE /v1/conversations/{conversation_id}` 删除一个任务；`DELETE /v1/spaces/{space_id}` 删除空间及其全部任务。成功返回 `{"deleted": true}`，不存在返回 404，执行仍在排队、运行、等待确认或清理中返回 409。跨任务的父子执行关联也返回 409，避免移除其他任务的数据。若删除会移除 Graph 版本，且其他执行尚未结束，也先返回 409，防止已解析但尚未写入 GraphRun 的共享编排被删除；没有待删除 Graph 的任务不受无关执行影响。删除与提交执行、创建任务、更新空间配置串行处理；客户端断连后已开始的删除继续完成。
+附件上传使用稳定 `client_attachment_id`，限制为 25 MiB，并校验 MIME 与字节格式。临时附件具有 24 小时有效期，正式消息引用后转为持久引用。产物属于具体 Execution，可关联 GraphRun 和 NodeAttempt。
 
-删除会清理任务的 SDK ShortMemory、会话级 facts、Execution、事件与恢复状态、GraphRun、NodeRun 和节点 JSON 产物。Graph 版本仅在没有其他执行（包括输入快照）、节点尝试或空间保存引用时删除；共享产物也按剩余节点引用保留。空间已保存的 Graph 不因来源任务被删而失效，之后仍可修改空间配置。清理成功后才移除空间与任务元数据；失败明确报错，可重试。已删任务只保留不含内容的 conversation ID 墓碑，阻止旧页面重新提交该 ID。模型、Tools、Skills 配置、用户工作区文件、用户级 facts、服务日志和外部遥测不在删除范围内。
+Space 删除先生成短期有效预览，展示归属对象、共享引用和阻塞原因。确认时再次核验 revision 与引用摘要，写入 cleanup generation。清理通过持久进度、回收目录和 tombstone 处理重试，共享内容按引用保留。已完成清理只发布一个终态事件。 清理预览绑定 SDK Session、任务文件与 Space facts 的数量和身份摘要。拥有者先保存完整递归 Session 清单，然后以同一代次执行 SDK、facts、工作目录、原始执行详情和产物回收，所有阶段完成后提交 Space tombstone。
 
-网页使用独立读模型聚合 Execution、Graph 定义、GraphRun、节点尝试及节点产物。Graph 节点直接显示配置资源与入边对应的依赖步骤；这些配置事实与实际调用记录、执行状态分开表达。横向布局、选中节点和对话浮层属于 Web 呈现，不改变图调度。节点输入在开始执行时持久化，旧记录缺失输入时明确返回 null。每次 Graph 调用创建独立的 `graph_run_id`，新 NodeRun 显式关联该调用；同一版本的多次执行不能按 node_id 混合节点结果。GraphRunner 原样保存 SDK 返回的 `GraphState`，跳过节点的调度状态来自该快照，不虚构 NodeRun。编排画布选择具体 GraphRun 后，节点详情只展示属于该次调用的尝试和产物；结果页仍保留本次 Execution 的全部产物及来源。运行中的调用尚无快照时显示其已记录尝试；终态缺失快照的节点显示未知。历史 NodeRun 没有 `graph_run_id` 时保留 null，不自动归入某次调用。产物按节点所属 Execution 校验，并由服务端解析生成的 artifact ID，不接收浏览器指定的文件系统路径。
+Worker 的文件与命令工具把 workspace 和 scratch 绑定到 `workspace/work/{space_id}/{execution_id}/`。宿主工具脚本以独立只读 `/tools` 挂载，selected Skill roots 单独授权。Space 显式绑定 `workspace` 资源后，通过只读 `workspace_resource` 查询和 materialize 共享资料，该入口屏蔽 `runtime-v2` 与 `work`。产物与附件通过 `execution_content` 进入授权视野。宿主私有运行数据由文件检查和 OCI 私有挂载遮罩共同隔离。
 
-SSE 先订阅在线总线，再读取事件 journal，持久事件按 sequence 去重与恢复；文本增量没有持久游标。断线后浏览器重新读取 SDK 公开会话历史和执行详情，不能把在线文本当成完整持久消息。缓冲溢出通过 `resync` 明确要求重同步。关闭网页或 SSE 不取消执行；取消与审批始终通过已有 ExecutionService。
+## 查询与事件
 
-本地单所有者、主 Run 审批恢复和 OCI 沙箱边界保持一致。Web 不做图调度，不读取 SDK 的私有数据库，也不绕过 Runner。操作与接口见 [Web 启动文档](weave-web.md)。
+`GET /v1/snapshot` 返回同一事务读取的全局水位、最近聊天、Space、Execution、Attention、计数与能力摘要。MessageView 在该读事务中把实际 Report 解析为来源工作摘要，并只暴露 ArtifactMetadata。聊天中的产物卡使用持久 artifact_id，删除或损坏后继续展示当前可用性。列表与原始内容使用有界分页。详情按当前选中对象读取，Graph 和原始 ToolResult 保留实际归属校验。
 
-| 选择 | 原因与边界 |
-| --- | --- |
-| 产品组装基于 Pleiad | 新界面和业务策略继续复用 Runtime，通用机制归 Pleiad，产品授权和记录归 Weave |
-| 按目标形成任务图 | 独立步骤可以并发，有依赖的步骤通过结构化结果协作；简单任务无需强制建图 |
-| 当前能力在绑定边界刷新 | 能力可以演进，已开始的调用保持自己的能力选择 |
-| 一个工作区由单进程拥有 | 进程锁阻止第二个执行拥有者；持久化只读查询可以与运行服务并存 |
-| 重启不自动重放运行中作业 | 等待审批的检查点可恢复；已认领为运行中的作业仍明确失败，避免重复产生副作用 |
-| 事件、结果与诊断分开 | 在线增量用于交互，持久化记录用于事实，Trace 与日志用于理解调用过程 |
+`GET /v1/events` 使用全局 sequence 回放 `product` 事件。未来游标、序列缺口或积压超过 1000 条时返回 `resync`，客户端重新取得 snapshot。`chat.message.created` 的 data 是同事务生成的 MessageView，前端按全局 sequence 去重并直接合并正式消息，派生对象使用有界节奏刷新。浏览器连接的生命周期独立于 Execution。
 
-Pleiad 提供通用 Handoff、Worker 和检查点机制；Weave 已接入主 Run 的显式工具审批，尚无独立 Worker 子作业和 Graph Agent 节点的审批恢复流程。包含需审批工具的图节点在执行前明确拒绝。文档中的任务图协作不表示分布式 Agent 服务或任意运行中作业可自动续跑。
+HTTP 绑定本地主机身份，校验同源 Origin，并要求写请求携带 snapshot 下发的 `X-Weave-CSRF`。静态 UI 与 API 同源。模型密钥、MCP 凭据和宿主绝对内容路径由服务端拥有。
 
-实现归属可从 [应用组装](../apps/weave/src/infrastructure/bootstrap.py)、[ExecutionService](../apps/weave/src/application/service.py)、[WeaveAgent](../apps/weave/src/agent/weave.py) 和 [图执行组装](../apps/weave/src/agent/graph.py) 继续追踪。
+产品观测复用宿主 OTel Meter。接收、路由、投递失败、控制耗时与 Worker 活跃数记录运行测量。只读 Observable 指标从产品事务采集队列、最老输入与待办年龄、责任处置、转派轮数和预算，父子工作按 scope 分开。已提交事件按类型累计，保留 handback、报告和清理事实的幂等计数，指标读取不会启动模型。
+
+控制请求返回耗时与取消清理时长分别计量。取消清理时长从产品日志中的首次 cancel 意图到确认 cancelled 的提交时间计算，包含等待真实子工作与副作用对账的时间，只有确认终结后记录。原始 ToolMessage 和后台最终 OperationResult 使用独立引用，原文页注明产品日志或 SDK Session 的读取水位。
+
+## 外部能力与观察源
+
+能力目录每次绑定时读取实际 Tool、Skill 和已启用 MCP 配置。Skill 在模型请求中先提供描述，正文通过授权的 `read_file` 按需读取。MCP 允许列表、凭据来源和 OAuth 登录由宿主管理。HTTP 与 stdio 调用使用 SDK MCP 实现，OCI 执行使用 SDK Sandbox。
+
+D6 提供宿主显式配置的本地只读目录观察源。配置、健康与已保存 observation 分别查询，`POST /v1/sources/{source_id}/observe` 显式扫描并提交带摘要的去重事实。扫描执行文件数量、单文件大小与总字节上限，拒绝符号链接越界。该阶段的调度输入由后续产品策略决定。
+
+具体接口和操作见 [Web 使用指南](weave-web.md)，SDK 机制见 [Pleiad 架构](pleiad-architecture.md)。

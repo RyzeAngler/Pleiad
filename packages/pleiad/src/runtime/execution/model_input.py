@@ -1,3 +1,4 @@
+import hashlib
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -41,6 +42,18 @@ class ModelInput:
     max_output_tokens: int
     output_schema: JsonSchema | None
 
+    def digest(self) -> str:
+        """Identify the exact resolved request without exposing its original content."""
+        payload = {
+            "instructions": self.instructions,
+            "messages": [message.model_dump(mode="json") for message in self.messages],
+            "tools": [tool.model_dump(mode="json") for tool in self.tools],
+            "max_output_tokens": self.max_output_tokens,
+            "output_schema": None if self.output_schema is None else thaw_json_object(self.output_schema),
+        }
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
 
 @dataclass(slots=True)
 class StreamToolCallState:
@@ -66,7 +79,7 @@ def tool_result_message(
     result: ToolResult,
     *,
     run_id: str,
-    turn_id: str,
+    step_id: str,
 ) -> ToolMessage:
     """Project one Tool result into its stable model-visible message.
 
@@ -74,10 +87,10 @@ def tool_result_message(
         call: Model-declared Tool call receiving the result.
         result: Normalized execution result.
         run_id: Run that owns the Tool execution.
-        turn_id: Turn that owns the Tool declaration.
+        step_id: ModelStep that owns the Tool declaration.
 
     Returns:
-        The Tool message persisted in ShortMemory and sent to the model.
+        The Tool message persisted in Session and sent to the model.
     """
     content = json.dumps(
         {
@@ -90,7 +103,7 @@ def tool_result_message(
         ensure_ascii=False,
         sort_keys=True,
     )
-    message_id = uuid5(NAMESPACE_URL, f"pleiad:tool-result:{run_id}:{turn_id}:{call.id}").hex
+    message_id = uuid5(NAMESPACE_URL, f"pleiad:tool-result:{run_id}:{step_id}:{call.id}").hex
     return ToolMessage(message_id=message_id, tool_call_id=call.id, content=content)
 
 

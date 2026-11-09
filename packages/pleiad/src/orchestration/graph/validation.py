@@ -134,4 +134,10 @@ class GraphValidator:
 
 def terminal_status(status: NodeStatus) -> bool:
     """Return whether a Node status has settled for dependency evaluation."""
-    return status in {NodeStatus.SUCCEEDED, NodeStatus.FAILED, NodeStatus.SKIPPED, NodeStatus.UNKNOWN}
+    return status in {
+        NodeStatus.SUCCEEDED,
+        NodeStatus.FAILED,
+        NodeStatus.SKIPPED,
+        NodeStatus.UNKNOWN,
+        NodeStatus.CANCELLED,
+    }

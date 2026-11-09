@@ -28,7 +28,7 @@ ALLOWED_ATTRIBUTE_NAMES = frozenset(
         "pleiad.call.id",
         "pleiad.context.candidate_count",
         "pleiad.context.tool_count",
-        "pleiad.context.turn_count",
+        "pleiad.context.step_count",
         "pleiad.error.code",
         "pleiad.error.type",
         "pleiad.graph.id",
@@ -48,7 +48,7 @@ ALLOWED_ATTRIBUTE_NAMES = frozenset(
         "pleiad.status",
         "pleiad.tool.code",
         "pleiad.tool.name",
-        "pleiad.turn.id",
+        "pleiad.step.id",
         "service.name",
         "service.version",
     }

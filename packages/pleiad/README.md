@@ -72,109 +72,142 @@ and [JSON Output guide](https://api-docs.deepseek.com/guides/json_mode/).
 `Agent` is a frozen declaration of a model, prompt, capabilities, selected Skills,
 output schema, and policy hints. Import it from `pleiad.agent.agent`.
 
-Every Agent receives the default Tool references `read_file`, `write_file`, and
-`command`. Explicit Tool references are appended after those defaults and duplicate
-codes are rejected. The host must bind every declared Tool before a Run starts.
+Omitting `tools` selects the default references `read_file`, `write_file`, and
+`command`. An explicit `tools` tuple is the complete selected set, including an
+empty tuple for a text-only Agent. The host binds every selected Tool before a
+Run starts and separately grants its permitted capabilities.
 
 Selected Skills contribute catalog metadata to the initial prompt. Their instruction
 files are not loaded into that prompt; the host must bind each selected Skill to the
 SDK `read_file` Tool so the model can request its `SKILL.md` when needed.
 
-## Context and Runtime
+## Sessions and Runtime
 
-`ContextBuilder` selects request-local `ContextBlock` references and
-`ContextRenderer` renders them beside the current User Message. The original
-message and dynamic references remain separate from `ShortMemory`; context
-budgets and compaction are evaluated for each model request at complete Turn
-boundaries.
+`Session` gives an interaction a stable host-selected identity. `SessionStore`
+owns its ordered input inbox, messages, complete `ModelStep` records, writer
+leases, Run checkpoints, receipts, tool intents, operations, and event journal.
+Use `InMemorySessionStore` for deterministic in-process execution or
+`SqliteSessionStore` for durable local state. Session input acceptance remains
+available while a Run owns its writer.
 
-Dynamic references are rendered for every request, including Tool continuations
-and checkpoint resumes. The request view preserves message order while the
-original User messages remain unchanged in ShortMemory.
-
-Runtime also binds `read_tool_result` to the invocation's ShortMemory. It is a
-reserved SDK Tool; hosts do not register it or add a capability grant for it.
-Omit `message_id` to list bounded, newest-first result references, using
-`after_message_id` to continue the list. Supply `message_id`, `start_char`, and
-`max_chars` to read a character page (4,000 by default, at most 8,000). References
-include the original UTF-8 SHA-256 digest and character count. They cannot select
-another memory ID or a filesystem path.
-
-Tool observations retain their complete original content in ShortMemory. The
-model request replaces observations above 64,000 characters with executable
-read references, including the most recent result. History compaction can also
-replace older retained observations. Even after an entire Turn leaves the
-request view, its results remain discoverable through `read_tool_result` while
-the host retains that memory. Weave's existing SQLite memory binding supplies
-durability; no separate result database or model-facing host path is required.
-
-`Runner` owns the ShortMemory-backed Model → Tool → Model loop. Bind concrete
-model clients on the `Agent`, then supply a `ShortMemory`, `RunConfig`, and the
-host's `ToolRegistry`, `SkillLoader`, and `ToolRuntime`:
+An `InputEnvelope` has a stable `input_id`, kind, source, content, and optional
+causation identity. Repeating the same accepted input returns its original
+receipt. Reusing its identity with different content fails. `Runner.start`
+accepts an explicit `invocation_id` and batch `input_ids`. Acknowledgement loss
+can be resolved through `Session.run_for_invocation` using the same identity.
+The `input_mode` selects a fixed batch or live intake at safe model boundaries.
 
 ```python
 from pleiad.agent.agent import Agent
-from pleiad.memory.short_memory import ShortMemory
-from pleiad.runtime.config import RunConfig
-from pleiad.runtime.execution.runner import Runner
+from pleiad.runtime.limits import RunLimits
+from pleiad.runtime.runner import Runner
+from pleiad.sessions.backends.in_memory import InMemorySessionStore
+from pleiad.sessions.input import InputEnvelope
+from pleiad.sessions.session import Session
+from pleiad.skills.loader import SkillLoader
+from pleiad.tools.registry import ToolRegistry
+from pleiad.tools.runtime import ToolRuntime
 
-result = await runner.run(
-    Agent(name="assistant", model=client, prompt="Answer the user."),
-    "hello",
-    memory=ShortMemory.in_memory("conversation-1"),
-    config=RunConfig(),
+runner = Runner(tools=ToolRegistry(), skills=SkillLoader(), tool_runtime=ToolRuntime())
+session = Session("chat-1", InMemorySessionStore())
+await session.enqueue(InputEnvelope(
+    input_id="message-1", kind="user", source="host", content="hello",
+))
+handle = await runner.start(
+    Agent(name="assistant", model=client, prompt="Answer the user.", tools=()),
+    session=session,
+    invocation_id="invocation-1",
+    input_ids=("message-1",),
+    input_mode="live",
+    limits=RunLimits(max_model_steps=16),
 )
+async with handle:
+    outcome = await handle.result()
 ```
 
-An interrupted run returns a `RunState` checkpoint in `RunResult`; resume it
-with `Runner.resume` and explicit interruption resolutions. `RunStream` uses
-the same execution path for ordered lifecycle events and early-close
-cancellation. SDK notifications inherit the public `Event` envelope from
-`pleiad.events.contracts`; product applications can define typed Event
-subclasses without registering them with Pleiad. Stream buffering is bounded
-and applies backpressure, while terminal events remain associated with their
-`run_id`.
+`RunHandle` owns active execution. Its `events(after_sequence=...)` iterator
+replays persisted `RunEvent` records, each containing a sequence and serialized
+`event` object. Closing an event iterator detaches that observer. Closing an
+active handle cancels its owned execution and awaits cleanup. Cancelling a
+caller waiting on `result()` preserves that caller's cancellation and leaves
+the independently owned execution available through its handle.
 
-Messages are concrete role-specific contracts imported from
-`pleiad.messages.message`: `SystemMessage`, `UserMessage`, `AssistantMessage`,
-and `ToolMessage`. An Assistant owns its model-declared `tool_calls`; the
-corresponding execution output is a later Tool message. Completed message
-snapshots and live text or Tool-argument deltas are published through the
-typed events in `pleiad.events.message`.
+Terminal `RunResult.state` is `succeeded`, `failed`, or `cancelled`. Its committed
+receipt includes output, usage, and a precise `reason`, such as `timeout` or
+`limit_reached`. A safe pause produces `RunSuspension` with the original Run's
+checkpoint and interruptions. `Runner.resume` validates the saved identity,
+Agent fingerprint, authorization, and limits before claiming the paused writer.
+Hosts supply explicit `ResumeDecision` objects for bound interruptions.
+`Runner.cancel_paused` settles a saved suspension without executing its action.
 
-Use the stream as an async context manager when the consumer may stop before
-the Run completes. Leaving the scope calls `aclose()`, cancels the owned Run,
-and waits for its cleanup. A bare `break` from `events()` is not the explicit
-resource boundary:
+`ModelStep`, imported from `pleiad.sessions.model_step`, represents one Assistant
+response and its ordered Tool results. Multiple User inputs may precede that
+response. Step identities use `step_id`, events use `step.started` and
+`step.completed`, and `RunLimits.max_model_steps` counts model responses.
+Messages, steps, SDK Runs, and product jobs have independent identities.
+`Session.history()` returns protocol-complete steps for model requests while
+`Session.read()` exposes bounded original interaction facts.
 
-```python
-from pleiad.events.message import MessageTextDeltaEvent
+`ContextBuilder` selects request-local `ContextBlock` values and
+`ContextRenderer` renders them alongside the selected inputs. Compaction changes
+the request view while original messages remain in the Session. Saved resume
+context retains the checkpoint's accepted reference snapshot. Runtime binds the
+reserved `read_tool_result` Tool to the current Session writer. It lists bounded
+result references or reads an original ToolMessage by `message_id` and character
+offset. Completed background results use a separate `operation_id` selector and
+`kind="operation"` reference listing. Both access paths remain within the bound
+Session, including historical Runs. Oversized observations retain complete source
+content in the store.
 
-async with runner.run_streamed(
-    agent,
-    "hello",
-    memory=memory,
-    config=config,
-) as stream:
-    async for event in stream.events():
-        if isinstance(event, MessageTextDeltaEvent):
-            render_delta(event.message_id, event.delta)
-    result = await stream.result()
-```
+A host enables `ToolPolicy.background=True` for a Tool that implements
+`supports_background` and `execute_background`. The Tool receives a
+`BackgroundAdmission` carrying its stable `operation_id`. It first persists the
+fully resolved request digest through `prepare(ToolSubmission)`, then
+acknowledges concrete backend acceptance with a matching `ToolAcceptance`.
+Runtime persists that receipt before returning one `started` ToolResult. Backend
+completion is a separate idempotent `operation_result` input containing a bounded `ResultReference`
+with the complete result digest and reading instructions. Its full `ToolResult`
+remains in the persisted operation record. The Run's TaskGroup retains
+concurrency and cleanup ownership through actual settlement.
 
-An optional host `event_sink` is awaited and isolated as best-effort
-notification. The RunStream delivery path remains reliable and propagates
-execution failures through `result()`; neither path is a persistence or
-exactly-once transaction interface.
+`BaseTool.authorize` can request host authorization before external admission.
+Runtime records its interruption with `phase="authorization"`. An approved
+`ResumeDecision` starts the original action in the same Run and operation scope.
+Tool-native interruptions use `phase="execution"` and resume through the Tool's
+own implementation. Current schemas, binding identities, permissions, and
+absolute deadlines are checked again on resume.
+
+The command Tool passes its operation identity into `SandboxRequest`. OCI
+acceptance records the actual created container, ownership labels, admission
+token, and request digest before starting it. `OciSandbox.query(operation_id)`
+recovers verified facts through another backend instance, and
+`OciSandbox.stop(SandboxReceipt)` verifies the exact receipt before removal and
+preserves exit facts already confirmed by its current inspection. Conflicting
+creates retain the original action. Ordinary backend absence and unconfirmed
+cancellation remain `unknown`. `ToolCancelledError` carries concrete
+backend stop confirmation when cleanup establishes it. Recovery evidence can
+include the original `ToolAcceptance` to commit a receipt recovered after an
+acknowledgement-loss window. Recovered acceptance must match the original
+prepared request digest.
+
+`OperationRecord.state` describes SDK Tool settlement. Command Tool success
+means it obtained actual process-exit facts. The command's `exit_code` and
+`timed_out` fields describe those facts, while `SandboxObservation.state`
+describes the backend process. A nonzero command exit therefore retains a
+successful Tool observation, and delivery requirements evaluate the actual exit
+facts against their declared expectations.
 
 ## Observability
 
 Pleiad emits provider-neutral OpenTelemetry spans and metrics from the actual
-Runtime, Context, Memory, Model, Tool, MCP, Sandbox, and Graph boundaries. The
+Runtime, Context, Session, Model, Tool, MCP, Sandbox, and Graph boundaries. The
 base package uses standard no-op providers unless the host explicitly supplies
 providers; a process-global OpenTelemetry provider does not implicitly enable
-Pleiad telemetry. Importing Pleiad does not read credentials, start exporters,
-or make network connections. Content attributes such as prompts, completions, Tool
+Pleiad telemetry. Operation metrics count actual admission, active ownership,
+settlement status, and lifecycle duration. Input-consumption metrics measure
+accepted input to its committed safe-boundary acknowledgement, once per input.
+Importing Pleiad does not read credentials, start exporters, or make network
+connections. Content attributes such as prompts, completions, Tool
 arguments, command text, and process output are denied by default.
 
 Langfuse is an explicit, host-owned optional integration. Install the extra,
@@ -197,7 +230,10 @@ langfuse = create_langfuse_observability(
 )
 runner = Runner(..., observability=langfuse.observability)
 try:
-    result = await runner.run(...)
+    handle = await runner.start(agent, session=session, invocation_id="next-call",
+                                input_ids=("next-input",), input_mode="batch", limits=RunLimits())
+    async with handle:
+        result = await handle.result()
 finally:
     await langfuse.shutdown()
 ```
@@ -212,24 +248,32 @@ a later call waits for that same operation instead of starting another one.
 
 ## Orchestration
 
-Orchestration is an SDK-only layer built on the Runtime. Import concrete
-objects from `pleiad.orchestration.supervisor`, `pleiad.orchestration.handoff`,
-and `pleiad.orchestration.graph`; it does not create a product task or
-execution record. `as_tool` is a module function for synchronous Worker
-delegation, `submit_worker` and `wait_workers` are explicit asynchronous
-controls inside an opened `Supervisor` scope. Concurrent Workers reserve from
-one parent budget ledger and return confirmed unused budget at completion.
-Worker grants are the intersection of parent, Worker, host, and Agent limits.
-Handoff switches the active Agent inside the same Run and
-ShortMemory. Graph uses `Graph`, `Node`, and `Edge`; Agent nodes call the
-existing Runner while normal async functions run directly.
+Orchestration builds on the same Runner. Import definitions directly from
+`pleiad.orchestration.handoff.handoff`, `pleiad.orchestration.subagents.subagent`,
+`pleiad.orchestration.subagents.group`, and the defining Graph modules.
 
-Pass the invoking `ToolContext` to `GraphExecutor.execute` for nested Agent
-Nodes. The executor intersects grants, deadlines, concurrency, and remaining
-allowances with the parent; sibling Nodes reserve disjoint child allowances
-and wait for confirmed refunds. Repeated Graph calls reuse the parent Run's
-pool. GraphExecutor and Supervisor can share an explicit `BudgetLedger` when
-the host combines both forms of delegation.
+A Handoff changes the active Agent within the same Run and Session. A
+`SubagentGroup` owns child SDK invocations scoped to one explicit parent Run.
+The first invocation binds its `ToolContext.run_id` for the group's lifetime.
+`as_tool`, `submit_subagent`, and `wait_subagents` provide model-facing delegation
+controls. Independent product Workers are composed by the host using durable
+product jobs and their own Sessions.
+
+Graph `Node` bindings use `session_store`, `runner`, `agent`, and `limits`.
+`GraphExecutor.execute` receives the invoking `ToolContext`, reserves disjoint
+child allowances, and intersects parent grants, deadlines, and concurrency.
+Agent interruptions return a node checkpoint. Restore `GraphState` and provide
+`NodeResume` decisions to continue that same Run while retaining completed
+siblings and its original reservation. The node input and graph revision must
+match the saved contract. `GraphExecutor.cancel_paused` owns child cancellation
+and exact budget settlement while preserving completed siblings.
+
+An external Node outcome with unknown effects remains `NodeStatus.UNKNOWN` and
+returns a failed Graph with `orchestration.graph.recovery_unknown`. Recovery
+requires host reconciliation before replay. Graph state includes cumulative
+child usage and `BudgetCheckpoint` reservations. `BudgetLedger` refunds only
+confirmed unused allowances. Multiple orchestration components may share an
+explicit ledger for the same parent.
 
 ## Data model boundaries
 
@@ -293,23 +337,15 @@ array indices use RFC 6901 syntax: `0` or an ASCII decimal integer without a
 leading zero; signed indices are rejected. Branch activation follows the
 validated Node state, including output-schema failures.
 
-An external NodeExecutor may return `PAUSED`. When its downstream Nodes cannot
-advance and no tasks remain active, GraphExecutor returns `PAUSED` with those
-Nodes still pending. Restoring that state retains completed sibling outputs.
-Agent Node interruption checkpoints require host orchestration and are not
-implicitly converted into a recoverable Agent Node result.
-
-Agent Node `LIMIT_REACHED` and `TIMED_OUT` outcomes are confirmed failed Nodes
-with their actual SDK Run identity, status, and usage. `GraphResult.child_usage`
-and `GraphState.child_usage` report child measurements separately from the
-parent's own usage. Unknown measurements remain null. GraphState requires this
-field; older serialized states without it are rejected.
+A paused Agent Node retains its Run checkpoint, input, usage, and budget
+reservation. Restoring that state keeps completed sibling outputs. Confirmed
+cancellation has its own terminal Node status. Failed or unknown external effects
+remain distinct from a safe resumable pause.
 
 A recovery fingerprint includes graph input/output schemas, concurrency and
 timeout settings, and node side-effect declarations. Change a graph definition
-by creating a new revision instead of restoring state against a changed contract.
-Executable handler code and external model behavior are host bindings; the
-host must keep them stable when restoring the same graph revision.
+by creating a new revision. Executable handlers and external model behavior are
+host bindings that must retain the same contract for a restored revision.
 
 ## MCP host authorization
 
@@ -321,42 +357,57 @@ their existing binding behavior; remote annotations never grant permissions.
 Normal request cancellation propagates through FastMCP and closes the owned
 connection. Remote background Task lifecycle and durable input/elicitation
 bridges remain outside this adapter; task-only Tools are explicitly rejected.
-Weave does not yet configure MCP servers through its workspace catalog.
+Hosts own MCP configuration, credentials, discovery, and connection policy.
 
 ## Reported usage and output budget
 
-`ModelUsage` counts are optional: `None` means the provider did not report a
-count, and `0` is a real reported zero. OpenAI streams request
-`stream_options={"include_usage": true}`. Partial cumulative usage updates
-preserve known fields; totals are derived only when both components are known.
-Anthropic message-start output usage does not establish the final output count.
-Missing counts are omitted from token metrics and span attributes;
-`model.completed` events serialize them as null.
+`ModelUsage` counts are optional. `None` means the provider did not report the
+measurement, while `0` is a reported zero. Partial cumulative stream updates
+preserve known fields. Totals are derived only when both components are known.
+Missing measurements stay null in records and are omitted from token metrics.
 
-`RunUsage` propagates unknown measured totals instead of replacing them with
-zero. `budget_output_tokens` is a separate cumulative budget charge, not a
-measurement. A call with reported output usage charges that count; if output
-usage is absent it charges the requested output limit conservatively. Each
-subsequent request uses only the remaining `RunConfig.max_output_tokens`
-allowance. Exhausted allowance prevents a further model call and returns
-`LIMIT_REACHED`; a final answer already received can still succeed.
+`RunUsage.input_tokens`, `output_tokens`, `total_tokens`, and `model_calls`
+measure the current invocation's own model work. `child_model_calls` and
+`child_budget_output_tokens` hold conservative scoped-descendant charges.
+`budget_output_tokens` includes both own and descendant charges. Unknown output
+usage consumes the requested output allowance conservatively. The next model
+request receives the remaining inclusive allowance, and the model-step guard
+counts own calls plus charged child steps.
 
-Worker and Graph budget settlement refunds only confirmed unused allowance.
-Unknown child outcomes keep their full reservations charged. Tool completion
-and checkpoint resume preserve those charges. The parent limits supplied to
-orchestration measure the parent's own remaining budget. The shared ledger
-accounts for child reservations and charges separately;
-later decreases in the parent's limits debit that shared pool exactly once.
-In-flight reservations remain held even when newly observed parent consumption
-exhausts admission capacity. A Handoff also reschedules the active timeout when
-the target Agent imposes an earlier deadline.
+Before entering the provider, Runner commits a `ModelAttemptRecord` containing
+the exact request digest, output allowance, deadline, and usage baseline. That
+transaction counts one call and reserves its full authorized output allowance.
+Cancellation, connection loss, and owner loss retain unknown measurements and
+the committed charge. A complete provider result atomically records its
+measurement and settles that attempt once. An expired authorization never
+enters the provider or creates a charged attempt.
 
-These limits apply to SDK invocations and child admission; they do not define
-an aggregate spending cap for a durable product Execution. A host restoring a
-parent after child delegation must persist `GraphExecutor.budget_state` along
-with its Run checkpoint and call `restore_budget` before continuing. BudgetState
-is settled allowance, not measured usage; active reservations cannot be saved
-as settled state, and restoring a different live pool is rejected.
-Run checkpoints now use version 2; version 1 checkpoints are rejected because
-they do not establish this accounting contract. No old-state migration or
-compatibility alias is supplied.
+`BudgetLedger`, `BudgetState`, and `BudgetCheckpoint` are imported from
+`pleiad.budgets`. Graph and SubagentGroup share that ledger with the parent
+Runtime. Active child reservations also reduce parent model admission. A parent
+can wait for an active child to settle before deciding that allowance is
+exhausted. Provider-reported overage remains charged at its actual amount.
+
+Host bindings expose the concrete `BaseTool.budget_ledger`. `FunctionTool`
+accepts the same keyword when a bound function executes SDK graph or child
+work. All scoped tools selected for a Run, including Handoff targets, must
+share one ledger. ToolRuntime attaches typed `UsageCharge` records to Tool
+results and interruptions independently of the model-visible JSON output.
+Each charge retains its original reservation identity and cumulative counters.
+Runtime merges that identity once, including partial resumes and repeated waits.
+
+Subagent tools also expose their actual `ToolScope`. Runner enters this scope,
+awaits or cancels accepted children, and closes it before committing the parent
+receipt. Async submission remains charged when the parent finishes without a
+wait call. A safe pause saves all scoped ownership snapshots, cumulative charge
+identities, and the shared ledger. Restored scope bindings use the original
+child checkpoints and outstanding reservations. Hosts invoking Group methods
+directly own an explicit `async with group` scope.
+
+A durable product Execution's cross-Run spending contract belongs to its host.
+The host settles each committed SDK receipt idempotently and retains aggregate
+product consumption across retries and resumed Runs.
+
+Session persistence uses its current versioned schema and Run checkpoints use
+version 1. Incompatible stored contracts fail validation before execution. A
+host selects a fresh storage path when adopting this redesigned contract.

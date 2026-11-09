@@ -7,7 +7,7 @@ from typing import Annotated, Literal
 import typer
 
 from pleiad_weave.infrastructure.config import MemorySettings
-from pleiad_weave.infrastructure.storage.memory import MemoryConflictError, MemoryFact, MemoryStore
+from pleiad_weave.infrastructure.storage.memory import FactStore, MemoryConflictError, MemoryFact
 
 memory_app = typer.Typer(help="Manage this workspace's locally owned memory facts.")
 
@@ -16,9 +16,9 @@ memory_app = typer.Typer(help="Manage this workspace's locally owned memory fact
 class MemoryCommand:
     """Bind local management commands to one host-configured memory scope."""
 
-    store: MemoryStore
-    scope: Literal["conversation", "user"]
-    conversation_id: str | None
+    store: FactStore
+    scope: Literal["space", "user"]
+    space_id: str | None
 
 
 @memory_app.callback()
@@ -27,22 +27,22 @@ def configure_memory(
     workspace: Annotated[
         Path | None, typer.Option("--workspace", help="Host workspace; defaults to deployment settings.")
     ] = None,
-    scope: Annotated[Literal["conversation", "user"], typer.Option("--scope")] = "conversation",
-    conversation_id: Annotated[str | None, typer.Option("--conversation-id")] = None,
+    scope: Annotated[Literal["space", "user"], typer.Option("--scope")] = "space",
+    space_id: Annotated[str | None, typer.Option("--space-id")] = None,
 ) -> None:
     """Select a local deployment scope without creating model or Sandbox clients."""
     try:
         settings = MemorySettings() if workspace is None else MemorySettings(workspace=workspace)
-        store = MemoryStore(
-            settings.runtime_root / "memory",
+        store = FactStore(
+            settings.runtime_root,
             user_id=settings.memory_user_id,
-            cross_conversation=settings.memory_cross_conversation,
+            cross_space=settings.memory_cross_space,
         )
-        store.management_scope_id(scope, conversation_id)
+        store.management_scope_id(scope, space_id)
     except (PermissionError, ValueError) as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(code=2) from error
-    context.obj = MemoryCommand(store, scope, conversation_id)
+    context.obj = MemoryCommand(store, scope, space_id)
 
 
 def command_binding(context: typer.Context) -> MemoryCommand:
@@ -71,9 +71,7 @@ def list_memory(context: typer.Context, include_inactive: Annotated[bool, typer.
     """List current facts, optionally including deactivated facts."""
     binding = command_binding(context)
     emit_memory(
-        lambda: binding.store.list_facts(
-            binding.scope, conversation_id=binding.conversation_id, include_inactive=include_inactive
-        )
+        lambda: binding.store.list_facts(binding.scope, space_id=binding.space_id, include_inactive=include_inactive)
     )
 
 
@@ -87,7 +85,7 @@ def show_memory(
     binding = command_binding(context)
 
     def select() -> tuple[MemoryFact, ...]:
-        records = binding.store.fact_history(binding.scope, memory_id, conversation_id=binding.conversation_id)
+        records = binding.store.fact_history(binding.scope, memory_id, space_id=binding.space_id)
         if not records:
             raise LookupError(f"Memory fact not found: {memory_id}")
         return records if history else (records[-1],)
@@ -111,7 +109,7 @@ def update_memory(
                 memory_id,
                 content,
                 expected_revision=expected_revision,
-                conversation_id=binding.conversation_id,
+                space_id=binding.space_id,
             ),
         )
     )
@@ -131,7 +129,7 @@ def deactivate_memory(
                 binding.scope,
                 memory_id,
                 expected_revision=expected_revision,
-                conversation_id=binding.conversation_id,
+                space_id=binding.space_id,
             ),
         )
     )

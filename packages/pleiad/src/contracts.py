@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from math import isfinite
 from types import MappingProxyType
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 type JsonScalar = str | int | float | bool | None
 type JsonValue = JsonScalar | list[JsonValue] | dict[str, JsonValue]
@@ -151,3 +151,12 @@ class ContractModel(BaseModel):
         frozen=True,
         validate_default=True,
     )
+
+
+class UsageCharge(ContractModel):
+    """Identify cumulative scoped-child budget charges independently of model observations."""
+
+    parent_run_id: str = Field(min_length=1)
+    charge_id: str = Field(min_length=1)
+    model_steps: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)

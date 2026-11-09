@@ -10,6 +10,7 @@ from pydantic import SecretStr
 from pleiad.models.anthropic.client import AnthropicModelClient, AnthropicProviderPort
 from pleiad.models.anthropic.request import AnthropicRequest
 from pleiad.models.anthropic.response import AnthropicStreamEvent
+from pleiad.models.errors import ModelConnectionError, ModelTimeoutError
 from pleiad.models.providers import anthropic as anthropic_provider
 from pleiad.models.providers import deepseek as deepseek_provider
 from pleiad.models.providers import glm as glm_provider
@@ -17,7 +18,89 @@ from pleiad.models.providers import kimi as kimi_provider
 from pleiad.models.providers import minimax as minimax_provider
 from pleiad.models.providers import qwen as qwen_provider
 
-from .support import FakeAnthropicClient, anthropic_raw_response
+from .support import FakeAnthropicClient, InterruptedByteStream, anthropic_raw_response
+
+
+@pytest.mark.parametrize(
+    ("provider_name", "provider_module"),
+    (
+        ("anthropic", anthropic_provider),
+        ("deepseek", deepseek_provider),
+        ("glm", glm_provider),
+        ("qwen", qwen_provider),
+        ("kimi", kimi_provider),
+        ("minimax", minimax_provider),
+    ),
+)
+@pytest.mark.parametrize(
+    ("transport_error", "model_error"),
+    ((httpx.RemoteProtocolError, ModelConnectionError), (httpx.ReadTimeout, ModelTimeoutError)),
+)
+def test_interrupted_anthropic_response_keeps_received_events_and_releases_the_response(
+    monkeypatch: pytest.MonkeyPatch,
+    provider_name: str,
+    provider_module: object,
+    transport_error: type[httpx.TransportError],
+    model_error: type[ModelConnectionError | ModelTimeoutError],
+) -> None:
+    events = (
+        {
+            "type": "message_start",
+            "message": {
+                "id": "partial",
+                "type": "message",
+                "role": "assistant",
+                "content": [],
+                "model": "test-model",
+                "stop_reason": None,
+                "stop_sequence": None,
+                "usage": {"input_tokens": 1, "output_tokens": 0},
+            },
+        },
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "partial"}},
+    )
+    content = "".join(f"event: {event['type']}\ndata: {json.dumps(event)}\n\n" for event in events)
+    failure = transport_error("Private provider transport detail")
+    stream = InterruptedByteStream(content.encode(), failure)
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=stream)
+
+    def create_client(
+        *, api_key: str, base_url: str | None, timeout: float, max_retries: int, default_headers: Mapping[str, str]
+    ) -> AsyncAnthropic:
+        return AsyncAnthropic(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=timeout,
+            max_retries=max_retries,
+            default_headers=default_headers,
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+        )
+
+    monkeypatch.setattr(provider_module, "AsyncAnthropic", create_client)
+
+    async def scenario() -> None:
+        client = AnthropicModelClient(provider=provider_name, model="test-model", api_key="test-key")
+        partial: list[AnthropicStreamEvent] = []
+        try:
+            with pytest.raises(model_error) as caught:
+                async for event in client.stream(
+                    {"messages": [{"role": "user", "content": "hello"}], "max_tokens": 32}
+                ):
+                    partial.append(event)
+            assert any(event.delta == {"type": "text_delta", "text": "partial"} for event in partial)
+            assert caught.value.__cause__ is failure
+            assert "Private provider transport detail" not in str(caught.value)
+            assert len(requests) == 1
+            assert stream.closed
+        finally:
+            await client.aclose()
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize(

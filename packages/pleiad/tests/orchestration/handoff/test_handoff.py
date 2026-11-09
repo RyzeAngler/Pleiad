@@ -4,7 +4,6 @@ from pathlib import Path
 
 from pleiad.agent.agent import Agent
 from pleiad.events.contracts import Event
-from pleiad.memory.short_memory import ShortMemory
 from pleiad.messages.message import AssistantMessage, ToolMessage
 from pleiad.models.anthropic.response import (
     AnthropicContentBlock,
@@ -20,16 +19,20 @@ from pleiad.models.openai.response import (
     OpenAIStreamToolCall,
 )
 from pleiad.orchestration.handoff.handoff import Handoff
-from pleiad.runtime.config import RunConfig
-from pleiad.runtime.lifecycle.state import RunStatus
-from tests.orchestration.supervisor.test_supervisor import tool_batch
-from tests.runtime.execution.test_runner import (
+from pleiad.runtime.limits import RunLimits
+from pleiad.runtime.result import RunResult
+from pleiad.sessions.backends.in_memory import InMemorySessionStore
+from pleiad.sessions.records import RunStatus
+from pleiad.sessions.session import Session
+from tests.fakes.runtime import (
     FakeAnthropicModel,
     FakeOpenAIModel,
     anthropic_text_batch,
     make_runner,
     text_batch,
 )
+from tests.orchestration.subagents.test_subagents import tool_batch
+from tests.runtime_support import run_agent
 
 
 def anthropic_handoff_batch(name: str, call_id: str) -> tuple[AnthropicStreamEvent, ...]:
@@ -72,7 +75,7 @@ def test_handoff_switches_the_next_model_with_one_run_and_one_memory(tmp_path: P
         name="transfer_to_reviewer",
         description="Transfer the current task to the reviewer.",
     ).bind(runner)
-    memory = ShortMemory.in_memory("handoff-memory")
+    memory = Session("handoff-memory", InMemorySessionStore())
     events: list[Event] = []
 
     async def event_sink(event: Event) -> None:
@@ -81,32 +84,35 @@ def test_handoff_switches_the_next_model_with_one_run_and_one_memory(tmp_path: P
     runner.event_sink = event_sink
 
     result = asyncio.run(
-        runner.run(
+        run_agent(
+            runner,
             source,
             "route this",
-            memory=memory,
-            config=RunConfig(),
+            session=memory,
+            limits=RunLimits(),
             handoffs=(binding,),
         )
     )
 
-    assert result.status is RunStatus.SUCCEEDED
+    assert result.state is RunStatus.SUCCEEDED
+
+    assert isinstance(result, RunResult)
     assert result.run_id
     assert result.final_output == "reviewed"
     assert len(source_model.requests) == 1
     assert len(target_model.requests) == 1
-    first_turn = asyncio.run(memory.read())[0]
-    handoff_message = first_turn.messages[-1]
+    first_step = asyncio.run(memory.history())[0]
+    handoff_message = first_step.messages[-1]
     assert isinstance(handoff_message, ToolMessage)
     assert json.loads(handoff_message.content)["output"]["control"] == "handoff"
     handoff_events = [event.kind for event in events if event.kind in {"handoff.started", "handoff.completed"}]
     assert handoff_events == ["handoff.started", "handoff.completed"]
-    turns = asyncio.run(memory.read())
-    assert [turn.agent_id for turn in turns] == ["assistant", "reviewer"]
+    steps = asyncio.run(memory.history())
+    assert [step.agent_id for step in steps] == ["assistant", "reviewer"]
     assert all(
         not isinstance(message, AssistantMessage) or message.content != "reviewed"
-        for turn in turns[:1]
-        for message in turn.messages
+        for step in steps[:1]
+        for message in step.messages
     )
 
 
@@ -161,16 +167,19 @@ def test_handoff_conflict_rejects_the_whole_batch_before_any_control_transition(
     ).bind(runner)
 
     result = asyncio.run(
-        runner.run(
+        run_agent(
+            runner,
             source,
             "route this",
-            memory=ShortMemory.in_memory("handoff-conflict"),
-            config=RunConfig(),
+            session=Session("handoff-conflict", InMemorySessionStore()),
+            limits=RunLimits(),
             handoffs=(binding,),
         )
     )
 
-    assert result.status is RunStatus.SUCCEEDED
+    assert result.state is RunStatus.SUCCEEDED
+
+    assert isinstance(result, RunResult)
     assert result.final_output == "source recovered"
     assert len(source_model.requests) == 2
     assert target_model.requests == []
@@ -192,16 +201,19 @@ def test_handoff_accepts_anthropic_source_and_openai_target_in_the_same_run(tmp_
     ).bind(runner)
 
     result = asyncio.run(
-        runner.run(
+        run_agent(
+            runner,
             source,
             "route this",
-            memory=ShortMemory.in_memory("reverse-handoff"),
-            config=RunConfig(),
+            session=Session("reverse-handoff", InMemorySessionStore()),
+            limits=RunLimits(),
             handoffs=(binding,),
         )
     )
 
-    assert result.status is RunStatus.SUCCEEDED
+    assert result.state is RunStatus.SUCCEEDED
+
+    assert isinstance(result, RunResult)
     assert result.final_output == "reviewed in reverse"
     assert len(source_model.requests) == 1
     assert len(target_model.requests) == 1

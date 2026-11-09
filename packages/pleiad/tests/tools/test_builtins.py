@@ -67,6 +67,8 @@ def create_bindings(
     tmp_path: Path,
     *,
     include_skill: bool = True,
+    excluded_workspace_paths: tuple[str, ...] = (),
+    workspace_mask_root: Path | None = None,
 ) -> tuple[ToolRegistry, Path, Path, RecordingExecutor]:
     """Create host roots, optional read-only roots, and a fake Sandbox boundary."""
     workspace = tmp_path / "workspace"
@@ -100,6 +102,8 @@ def create_bindings(
             image=f"python@sha256:{'a' * 64}",
             allow_shell_command=True,
         ),
+        excluded_workspace_paths=excluded_workspace_paths,
+        workspace_mask_root=workspace_mask_root,
     )
     return registry, workspace, scratch, backend
 
@@ -621,6 +625,105 @@ def test_command_returns_nonzero_process_facts_and_mounts_only_selected_roots(tm
         f"type=bind,src={(tmp_path / 'demo').as_posix()},dst=/pleiad/skills/demo,readonly",
     ]
     assert create_command[-4:] == ("--noprofile", "--norc", "-c", "python skills/demo/scripts/check.py")
+
+
+@pytest.mark.parametrize("code", ["read_file", "write_file"])
+@pytest.mark.parametrize("alias", [False, True])
+def test_file_tools_reject_host_owned_workspace_subtrees_and_symlink_aliases(
+    tmp_path: Path, code: str, alias: bool
+) -> None:
+    mask_root = tmp_path / "mask"
+    mask_root.mkdir()
+    registry, workspace, _, _ = create_bindings(
+        tmp_path, excluded_workspace_paths=("owner-state",), workspace_mask_root=mask_root
+    )
+    private = workspace / "owner-state"
+    private.mkdir()
+    (private / "secrets.txt").write_text("host-owned", encoding="utf-8")
+    (workspace / "alias").symlink_to(private, target_is_directory=True)
+    path = "alias/secrets.txt" if alias else "owner-state/secrets.txt"
+    arguments: JsonObject = (
+        {"scope": "workspace", "path": path}
+        if code == "read_file"
+        else {
+            "path": path,
+            "content": "modified",
+            "mode": "replace",
+            "expected_sha256": hashlib.sha256(b"host-owned").hexdigest(),
+        }
+    )
+    outcome = invoke(registry, code, arguments, grants=frozenset({"file.read", "file.write"}))
+
+    assert not outcome.ok
+    assert outcome.error_code == ToolErrorCode.FILE_ACCESS_DENIED
+    assert (private / "secrets.txt").read_text(encoding="utf-8") == "host-owned"
+
+
+def test_workspace_exclusion_preserves_access_to_similarly_named_user_directories(tmp_path: Path) -> None:
+    registry, workspace, _, _ = create_bindings(tmp_path, excluded_workspace_paths=("owner-state",))
+    outcome = invoke(
+        registry,
+        "write_file",
+        {"path": "owner-state-public/result.txt", "content": "user work"},
+        grants=frozenset({"file.write"}),
+    )
+
+    assert outcome.ok
+    assert (workspace / "owner-state-public" / "result.txt").read_text(encoding="utf-8") == "user work"
+
+
+def test_command_masks_host_owned_state_without_modifying_its_files(tmp_path: Path) -> None:
+    mask_root = tmp_path / "mask"
+    mask_root.mkdir()
+    registry, workspace, _, backend = create_bindings(
+        tmp_path, excluded_workspace_paths=("owner-state",), workspace_mask_root=mask_root
+    )
+    private = workspace / "owner-state"
+    private.mkdir()
+    (private / "database.sqlite3").write_bytes(b"host database")
+
+    outcome = invoke(registry, "command", {"command": "ls workspace"}, grants=frozenset({"sandbox.command"}))
+
+    assert outcome.ok
+    create_command = backend.commands[1]
+    mounts = [create_command[index + 1] for index, value in enumerate(create_command) if value == "--mount"]
+    assert mounts == [
+        f"type=bind,src={workspace.as_posix()},dst=/pleiad/workspace,readonly",
+        f"type=bind,src={mask_root.as_posix()},dst=/pleiad/workspace/owner-state,readonly",
+        f"type=bind,src={(tmp_path / 'scratch').as_posix()},dst=/pleiad/scratch",
+        f"type=bind,src={(tmp_path / 'demo').as_posix()},dst=/pleiad/skills/demo,readonly",
+    ]
+    assert (private / "database.sqlite3").read_bytes() == b"host database"
+    assert tuple(mask_root.iterdir()) == ()
+
+
+def test_command_rejects_workspace_exclusions_without_a_mask_directory(tmp_path: Path) -> None:
+    registry, _, _, _ = create_bindings(tmp_path, excluded_workspace_paths=("owner-state",))
+
+    with pytest.raises(ValueError, match="exclusions require"):
+        registry.load("command")
+
+
+@pytest.mark.parametrize("location", ["workspace", "scratch", "skill", "nonempty", "symlink"])
+def test_file_binding_rejects_masks_that_model_tools_can_write_or_read(tmp_path: Path, location: str) -> None:
+    workspace = tmp_path / "workspace"
+    scratch = tmp_path / "scratch"
+    skill = tmp_path / "skill"
+    workspace.mkdir()
+    scratch.mkdir()
+    skill.mkdir()
+    root = {"workspace": workspace, "scratch": scratch, "skill": skill}.get(location, tmp_path / "private-mask")
+    mask_root = root / "mask"
+    mask_root.mkdir(parents=True)
+    if location == "nonempty":
+        (mask_root / "data").write_text("private", encoding="utf-8")
+    elif location == "symlink":
+        link = tmp_path / "linked-mask"
+        link.symlink_to(mask_root, target_is_directory=True)
+        mask_root = link
+
+    with pytest.raises(ValueError, match="mask"):
+        FileToolBinding(workspace, scratch, skill_roots={"test": skill}, workspace_mask_root=mask_root)
 
 
 def test_default_tool_schema_comes_from_the_parameter_model(tmp_path: Path) -> None:

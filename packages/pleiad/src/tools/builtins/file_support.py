@@ -30,6 +30,8 @@ class FileToolBinding:
     max_read_bytes: int = 1_048_576
     max_write_bytes: int = 1_048_576
     max_lines: int = 2_000
+    excluded_workspace_paths: tuple[str, ...] = ()
+    workspace_mask_root: Path | None = None
 
     def __post_init__(self) -> None:
         """Require existing absolute roots and positive bounded limits."""
@@ -46,6 +48,46 @@ class FileToolBinding:
                 raise ValueError("skill root codes must be non-empty single path segments")
             roots[code] = validate_root(root, f"skill root {code}")
         object.__setattr__(self, "skill_roots", MappingProxyType(roots))
+        exclusions: list[str] = []
+        for value in self.excluded_workspace_paths:
+            try:
+                relative_path = normalize_relative_path(value, "excluded workspace")
+            except ToolFileAccessDeniedError as error:
+                raise ValueError("Excluded workspace paths must be relative POSIX directory paths") from error
+            if any(
+                relative_path == previous
+                or relative_path.startswith(previous + "/")
+                or previous.startswith(relative_path + "/")
+                for previous in exclusions
+            ):
+                raise ValueError("Excluded workspace paths must not overlap")
+            exclusions.append(relative_path)
+        object.__setattr__(self, "excluded_workspace_paths", tuple(sorted(exclusions)))
+        if self.workspace_mask_root is not None:
+            mask_root = validate_root(self.workspace_mask_root, "workspace mask")
+            if any(
+                mask_root.is_relative_to(root) or root.is_relative_to(mask_root)
+                for root in (workspace, scratch, *roots.values())
+            ):
+                raise ValueError("The workspace mask must be outside every exposed file Tool root")
+            if any(mask_root.iterdir()):
+                raise ValueError("The workspace mask must be an empty host-owned directory")
+            object.__setattr__(self, "workspace_mask_root", mask_root)
+
+    def validate_workspace_path(self, relative_path: str) -> None:
+        """Reject access to a normalized path inside a host-excluded subtree.
+
+        Args:
+            relative_path: A path already checked by normalize_relative_path.
+
+        Raises:
+            ToolFileAccessDeniedError: If the path names an excluded subtree.
+        """
+        if any(
+            relative_path == excluded or relative_path.startswith(excluded + "/")
+            for excluded in self.excluded_workspace_paths
+        ):
+            raise ToolFileAccessDeniedError("The workspace path belongs to a host-owned excluded directory.")
 
 
 def validate_root(root: Path, name: str) -> Path:

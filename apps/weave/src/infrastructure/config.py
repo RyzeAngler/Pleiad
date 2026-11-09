@@ -12,7 +12,7 @@ class MemorySettings(BaseSettings):
 
     workspace: Path = Path("workspace")
     memory_user_id: str = Field(default="default-user", min_length=1)
-    memory_cross_conversation: bool = False
+    memory_cross_space: bool = False
 
     @field_validator("workspace")
     @classmethod
@@ -22,14 +22,18 @@ class MemorySettings(BaseSettings):
 
     @property
     def runtime_root(self) -> Path:
-        """Return the persistence root for this deployment workspace."""
-        return self.workspace / "runtime"
+        """Return the new-format persistence root without opening legacy data."""
+        return self.workspace / "runtime-v2"
 
 
 class Settings(MemorySettings):
     """Own deployment settings independently from the reusable SDK."""
 
     capability_file: Path | None = None
+    observe_directory: Path | None = None
+    observe_max_files: int = Field(default=1000, ge=1)
+    observe_max_file_bytes: int = Field(default=25 * 1024 * 1024, ge=1)
+    observe_max_total_bytes: int = Field(default=100 * 1024 * 1024, ge=1)
     llm_protocol: Literal["openai", "anthropic"] = "openai"
     llm_provider: Literal["openai", "anthropic", "deepseek", "glm", "qwen", "kimi", "minimax"] = "deepseek"
     llm_model: str = Field(default="deepseek-v4-flash", min_length=1)
@@ -50,6 +54,19 @@ class Settings(MemorySettings):
     log_max_file_bytes: int = Field(default=30 * 1024 * 1024, ge=1024 * 1024)
     sandbox_runtime: Literal["docker", "podman"] = "docker"
     sandbox_image: str = Field(min_length=1)
+
+    @field_validator("observe_directory", mode="before")
+    @classmethod
+    def resolve_observe_directory(cls, value: object) -> Path | None:
+        """Keep an unset or blank source disabled and resolve only explicit host paths."""
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        if not isinstance(value, str | Path):
+            raise ValueError("The read-only directory source requires a host path")
+        return Path(value).expanduser().absolute()
+
+    max_workers: int = Field(default=3, ge=1, le=32)
+    queue_capacity: int = Field(default=1_000, ge=1, le=100_000)
 
     @field_validator("approval_tool_codes")
     @classmethod

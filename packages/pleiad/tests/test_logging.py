@@ -56,11 +56,11 @@ def test_log_context_rejects_invalid_values_when_constructed_directly() -> None:
 def test_nested_log_context_restores_the_parent_values() -> None:
     with bind_log_context(execution_id="execution-1"):
         parent = current_log_context()
-        with bind_log_context(session_id="session-1", turn_id="turn-1"):
+        with bind_log_context(session_id="session-1", step_id="step-1"):
             assert current_log_context() == LogContext(
                 execution_id="execution-1",
                 session_id="session-1",
-                turn_id="turn-1",
+                step_id="step-1",
             )
         assert current_log_context() == parent
 
@@ -118,7 +118,9 @@ def test_context_filter_adds_bound_correlation_fields(local_logger: tuple[loggin
         extra={"api_key": "test-value"},
     )
 
-    with bind_log_context(execution_id="execution-1", tool_code="search"):
+    with bind_log_context(
+        execution_id="execution-1", run_id="run-1", call_id="call-1", message_id="message-1", tool_code="search"
+    ):
         assert ContextFilter().filter(record) is True
 
     values = vars(record)
@@ -126,8 +128,11 @@ def test_context_filter_adds_bound_correlation_fields(local_logger: tuple[loggin
     assert values["tool_code"] == "search"
     assert {field: getattr(record, field) for field in LOG_CONTEXT_FIELDS} == {
         "execution_id": "execution-1",
+        "run_id": "run-1",
+        "call_id": "call-1",
+        "message_id": "message-1",
         "session_id": None,
-        "turn_id": None,
+        "step_id": None,
         "trace_id": None,
         "span_id": None,
         "agent_name": None,

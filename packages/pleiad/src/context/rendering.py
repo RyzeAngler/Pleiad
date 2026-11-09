@@ -13,7 +13,7 @@ class ContextRenderer:
         """Return a temporary User message that preserves the original input fields.
 
         Args:
-            user_message: Original User message that will remain in ShortMemory.
+            user_message: Original User message that will remain in the Session journal.
             context_view: Dynamic, untrusted reference data for this request.
 
         Returns:
@@ -39,14 +39,14 @@ class ContextRenderer:
         self,
         messages: tuple[Message, ...],
         *,
-        user_message: UserMessage | None,
+        input_messages: tuple[UserMessage, ...],
         context_view: ContextView,
     ) -> tuple[Message, ...]:
         """Render references in the current request without changing stored history.
 
         Args:
             messages: Retained completed history in its original order.
-            user_message: New User message, or None for continuation requests.
+            input_messages: Ordered current inputs, empty for continuation requests.
             context_view: References selected for this model request.
 
         Returns:
@@ -54,7 +54,7 @@ class ContextRenderer:
             If compaction retained no User message, a reference-only User message
             follows the retained history.
         """
-        request = messages if user_message is None else (*messages, user_message)
+        request = (*messages, *input_messages)
         if not context_view.blocks:
             return request
         for index in range(len(request) - 1, -1, -1):

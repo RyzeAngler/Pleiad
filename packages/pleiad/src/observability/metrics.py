@@ -1,6 +1,6 @@
 import logging
 
-from opentelemetry.metrics import Counter, Histogram, Meter, NoOpMeterProvider
+from opentelemetry.metrics import Counter, Histogram, Meter, NoOpMeterProvider, UpDownCounter
 
 from pleiad.observability.attributes import SCOPE_NAME
 
@@ -28,6 +28,13 @@ class ObservabilityMetrics:
         self.tool_duration: Histogram = meter.create_histogram("pleiad.tool.duration", unit="s")
         self.model_input_tokens: Histogram = meter.create_histogram("pleiad.model.input_tokens", unit="{token}")
         self.model_output_tokens: Histogram = meter.create_histogram("pleiad.model.output_tokens", unit="{token}")
+        self.operation_count: Counter = meter.create_counter("pleiad.operation.transitions", unit="{transition}")
+        self.operation_active: UpDownCounter = meter.create_up_down_counter(
+            "pleiad.operation.active", unit="{operation}"
+        )
+        self.operation_duration: Histogram = meter.create_histogram("pleiad.operation.duration", unit="s")
+        self.input_count: Counter = meter.create_counter("pleiad.input.consumed", unit="{input}")
+        self.input_latency: Histogram = meter.create_histogram("pleiad.input.consumption.latency", unit="s")
 
     def record_run(self, status: str) -> None:
         """Count one Run by controlled terminal status."""
@@ -66,3 +73,31 @@ class ObservabilityMetrics:
                 self.tool_failure_count.add(1, attributes)
         except Exception:
             logger.exception("observability tool metric failed")
+
+    def record_operation_started(self) -> None:
+        """Measure an operation only after concrete backend admission was persisted."""
+        try:
+            self.operation_count.add(1, {"status": "started"})
+            self.operation_active.add(1)
+        except Exception:
+            logger.exception("observability operation admission metric failed")
+
+    def record_operation_finished(self, status: str, duration_seconds: float, *, accepted: bool) -> None:
+        """Measure actual settlement and release only an admitted operation's active gauge."""
+        attributes = {"status": status}
+        try:
+            self.operation_count.add(1, attributes)
+            self.operation_duration.record(duration_seconds, attributes)
+            if accepted:
+                self.operation_active.add(-1)
+        except Exception:
+            logger.exception("observability operation settlement metric failed")
+
+    def record_input_consumed(self, kind: str, latency_seconds: float) -> None:
+        """Measure newly committed consumption independently of duplicate deliveries and model steps."""
+        attributes = {"kind": kind}
+        try:
+            self.input_count.add(1, attributes)
+            self.input_latency.record(max(0.0, latency_seconds), attributes)
+        except Exception:
+            logger.exception("observability input consumption metric failed")

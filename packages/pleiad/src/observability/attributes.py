@@ -3,7 +3,7 @@ from collections.abc import Mapping, Sequence
 SCOPE_NAME = "pleiad"
 
 RUN_NAME = "pleiad.run"
-TURN_NAME = "pleiad.turn"
+STEP_NAME = "pleiad.step"
 CONTEXT_BUILD_NAME = "pleiad.context.build"
 CONTEXT_COMPACT_NAME = "pleiad.context.compact"
 MODEL_GENERATE_NAME = "pleiad.model.generate"
@@ -18,7 +18,7 @@ MEMORY_READ_NAME = "pleiad.memory.read"
 
 RUN_ID = "pleiad.run.id"
 PARENT_RUN_ID = "pleiad.parent_run.id"
-TURN_ID = "pleiad.turn.id"
+STEP_ID = "pleiad.step.id"
 CALL_ID = "pleiad.call.id"
 AGENT_NAME = "pleiad.agent.name"
 TOOL_CODE = "pleiad.tool.code"

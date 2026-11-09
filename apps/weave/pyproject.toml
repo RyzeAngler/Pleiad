@@ -17,6 +17,7 @@ dependencies = [
     "httpx[socks]>=0.28.1,<1.0.0",
     "pydantic-settings>=2.10.0,<3.0.0",
     "python-dotenv>=1.1.0,<2.0.0",
+    "python-multipart>=0.0.33,<0.1.0",
     "py-key-value-aio>=0.4.6,<1.0.0",
     "textual>=0.60.0,<1.0.0",
     "typer>=0.16.0,<1.0.0",

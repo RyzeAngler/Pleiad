@@ -1,9 +1,11 @@
 from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Literal
 from uuid import uuid4
 
 from pydantic import Field, field_validator
 
-from pleiad.contracts import ContractModel, JsonObject, freeze_json_object, thaw_json_object
+from pleiad.contracts import ContractModel, JsonObject, UsageCharge, freeze_json_object, thaw_json_object
 from pleiad.tools.contracts import ToolResult
 
 
@@ -16,7 +18,9 @@ class ToolInterruption(ContractModel):
     tool_name: str = Field(min_length=1)
     arguments: JsonObject
     reason: str = Field(min_length=1)
+    phase: Literal["authorization", "execution"] = "execution"
     details: JsonObject = Field(default_factory=dict)
+    usage_charges: tuple[UsageCharge, ...] = ()
 
     @field_validator("arguments", "details", mode="before")
     @classmethod
@@ -32,6 +36,24 @@ class InterruptionResponse(ContractModel):
 
     interruption_id: str = Field(min_length=1)
     result: ToolResult
+
+
+@dataclass(frozen=True, slots=True)
+class ToolAuthorization:
+    """Bind one approved host decision to its original immutable Tool interruption."""
+
+    interruption: ToolInterruption
+    response: InterruptionResponse
+
+    def __post_init__(self) -> None:
+        """Require an explicit approval for the same pending call and authorization phase."""
+        if (
+            self.interruption.phase != "authorization"
+            or self.interruption.interruption_id != self.response.interruption_id
+            or self.interruption.call_id != self.response.result.call_id
+            or not self.response.result.ok
+        ):
+            raise ValueError("Tool authorization must approve its original pending action")
 
 
 type ToolExecutionOutcome = ToolResult | ToolInterruption

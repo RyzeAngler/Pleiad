@@ -6,36 +6,41 @@ from pathlib import Path
 import pytest
 
 from pleiad.agent.agent import Agent
+from pleiad.budgets import BudgetLedger, BudgetStateError
 from pleiad.context.selection.models import ContextBlock
 from pleiad.contracts import CapabilityGrants, JsonObject, JsonSchema
 from pleiad.events.graph import GraphEvent, GraphEventKind
-from pleiad.events.runtime import RunLimitReachedEvent, RunTimedOutEvent
-from pleiad.memory.short_memory import ShortMemory
+from pleiad.events.runtime import RunFailedEvent
 from pleiad.messages.message import UserMessage
-from pleiad.orchestration.budget import BudgetLedger
-from pleiad.orchestration.errors import OrchestrationStateError
 from pleiad.orchestration.graph.edge import Edge, EdgeCondition, EdgeMapping
 from pleiad.orchestration.graph.errors import GraphSystemFault
 from pleiad.orchestration.graph.executor import GraphExecutor
 from pleiad.orchestration.graph.graph import Graph, OutputBinding
 from pleiad.orchestration.graph.node import Node
-from pleiad.orchestration.graph.state import GraphResult, GraphStatus, NodeResult, NodeStatus
+from pleiad.orchestration.graph.state import GraphResult, GraphStatus, NodeResult, NodeResume, NodeStatus
 from pleiad.orchestration.handoff.handoff import Handoff
-from pleiad.orchestration.supervisor.supervisor import Supervisor
-from pleiad.orchestration.supervisor.worker import Worker
-from pleiad.runtime.config import RunConfig
-from pleiad.runtime.lifecycle.state import RunStatus
+from pleiad.orchestration.subagents.group import SubagentGroup
+from pleiad.orchestration.subagents.subagent import Subagent
+from pleiad.runtime.checkpoint import ResumeDecision
+from pleiad.runtime.limits import RunLimits
 from pleiad.runtime.policy import HostPolicy
-from pleiad.tools.contracts import ParentRunLimits, ToolContext
-from tests.orchestration.supervisor.test_supervisor import tool_batch
-from tests.runtime.execution.test_runner import (
+from pleiad.runtime.result import RunResult
+from pleiad.sessions.backends.in_memory import InMemorySessionStore
+from pleiad.sessions.checkpoint import RunCheckpoint
+from pleiad.sessions.records import RunStatus
+from pleiad.sessions.session import Session
+from pleiad.tools.contracts import ParentRunLimits, ToolContext, ToolResult
+from tests.fakes.runtime import (
     BlockingOpenAIModel,
     FakeAnthropicModel,
     FakeOpenAIModel,
     anthropic_text_batch,
+    interrupting_tool,
     make_runner,
     text_batch,
 )
+from tests.orchestration.subagents.test_subagents import tool_batch
+from tests.runtime_support import input_text
 
 
 async def wait_for_event(event: asyncio.Event) -> None:
@@ -43,17 +48,17 @@ async def wait_for_event(event: asyncio.Event) -> None:
     await asyncio.wait_for(event.wait(), timeout=1)
 
 
-def test_agent_node_references_reach_model_without_changing_input_contract_or_stored_turn(tmp_path: Path) -> None:
+def test_agent_node_references_reach_model_without_changing_input_contract_or_stored_step(tmp_path: Path) -> None:
     async def scenario() -> None:
         model = FakeOpenAIModel((text_batch("done", "final"),))
         runner, agent = make_runner(model, tmp_path)
-        memory = ShortMemory.in_memory("node-context")
+        memory = Session("node-context", InMemorySessionStore())
         node = Node(
             "contextual",
             agent=agent,
             runner=runner,
             input_schema={"type": "object", "additionalProperties": False},
-            memory_factory=lambda node_run_id: memory,
+            session_store=memory.store,
             context_blocks=(ContextBlock(kind="reference", origin="test.host", content="Reference facts"),),
         )
         result = await GraphExecutor().execute(Graph(graph_id="contextual-node", nodes=(node,)), {})
@@ -63,13 +68,19 @@ def test_agent_node_references_reach_model_without_changing_input_contract_or_st
         block = user.content[0]
         assert isinstance(block, dict) and isinstance(block["text"], str)
         assert "Reference facts" in block["text"]
-        assert "<request>\n{}\n</request>" in block["text"]
+        assert '"content":"{}"' in block["text"]
+        assert '"source":"graph:contextual"' in block["text"]
         system = next(message for message in model.requests[0].messages if message.role == "system")
         assert "Reference facts" not in str(system.content)
-        turns = await memory.read()
-        assert [message.content for turn in turns for message in turn.messages if isinstance(message, UserMessage)] == [
-            "{}"
-        ]
+        session_id = result.state.node_states[0].session_id
+        assert session_id is not None
+        steps = await Session(session_id, memory.store).history()
+        assert [
+            input_text(message.content)
+            for step in steps
+            for message in step.messages
+            if isinstance(message, UserMessage)
+        ] == ["{}"]
 
     asyncio.run(scenario())
 
@@ -77,10 +88,10 @@ def test_agent_node_references_reach_model_without_changing_input_contract_or_st
 def test_agent_node_budget_limit_is_a_known_failure_with_its_run_identity_and_usage(tmp_path: Path) -> None:
     model = FakeOpenAIModel((tool_batch("echo", '{"value":"x"}', "call-1"),), report_usage=False)
     runner, agent = make_runner(model, tmp_path)
-    events: list[RunLimitReachedEvent] = []
+    events: list[RunFailedEvent] = []
 
     async def collect(event: object) -> None:
-        if isinstance(event, RunLimitReachedEvent):
+        if isinstance(event, RunFailedEvent):
             events.append(event)
 
     runner.event_sink = collect
@@ -91,7 +102,7 @@ def test_agent_node_budget_limit_is_a_known_failure_with_its_run_identity_and_us
                 "limited",
                 agent=agent,
                 runner=runner,
-                config=RunConfig(max_output_tokens=5),
+                limits=RunLimits(max_output_tokens=5),
             ),
         ),
     )
@@ -100,7 +111,7 @@ def test_agent_node_budget_limit_is_a_known_failure_with_its_run_identity_and_us
     assert result.status is GraphStatus.FAILED
     assert result.error_code == "orchestration.graph.node_limit_reached"
     state = result.state.node_states[0]
-    assert state.status is NodeStatus.FAILED and state.run_status is RunStatus.LIMIT_REACHED
+    assert state.status is NodeStatus.FAILED and state.run_status is RunStatus.FAILED
     assert len(events) == 1 and state.node_run_id == events[0].run_id
     assert state.usage is not None and state.usage.output_tokens is None
     assert result.child_usage is not None and result.child_usage.budget_output_tokens == 5
@@ -120,10 +131,10 @@ def test_agent_node_timeout_preserves_the_known_run_instead_of_raising_a_system_
         monkeypatch.setattr(asyncio, "timeout", controlled_timeout)
         model = BlockingOpenAIModel()
         runner, agent = make_runner(model, tmp_path)
-        events: list[RunTimedOutEvent] = []
+        events: list[RunFailedEvent] = []
 
         async def collect(event: object) -> None:
-            if isinstance(event, RunTimedOutEvent):
+            if isinstance(event, RunFailedEvent):
                 events.append(event)
 
         runner.event_sink = collect
@@ -131,8 +142,8 @@ def test_agent_node_timeout_preserves_the_known_run_instead_of_raising_a_system_
         await wait_for_event(model.started)
         scope.reschedule(asyncio.get_running_loop().time())
         result = await asyncio.wait_for(task, 1)
-        assert result.status is NodeStatus.FAILED and result.run_status is RunStatus.TIMED_OUT
-        assert result.error_code == "orchestration.graph.node_timed_out"
+        assert result.status is NodeStatus.FAILED and result.run_status is RunStatus.FAILED
+        assert result.error_code == "orchestration.graph.node_timeout"
         assert len(events) == 1 and result.node_run_id == events[0].run_id
         assert result.usage is not None
 
@@ -162,7 +173,7 @@ def test_graph_child_inherits_parent_grants_deadline_identity_and_remaining_budg
         run_id="parent-run",
         parent_limits=ParentRunLimits(
             deadline=deadline,
-            remaining_turns=4,
+            remaining_model_steps=4,
             remaining_output_tokens=6,
             tool_concurrency=1,
         ),
@@ -216,14 +227,14 @@ def test_parallel_graph_children_reserve_disjoint_parent_allowances(tmp_path: Pa
             root.mkdir()
             runner, agent = make_runner(model, root, wait)
             nodes.append(
-                Node(str(index), agent=agent, runner=runner, config=RunConfig(max_turns=2, max_output_tokens=5))
+                Node(str(index), agent=agent, runner=runner, limits=RunLimits(max_model_steps=2, max_output_tokens=5))
             )
         context = ToolContext(
             call_id="graph",
             run_id="parent",
             parent_limits=ParentRunLimits(
                 deadline=datetime.now(UTC) + timedelta(minutes=1),
-                remaining_turns=4,
+                remaining_model_steps=4,
                 remaining_output_tokens=8,
                 tool_concurrency=concurrency,
             ),
@@ -278,7 +289,7 @@ def test_ready_graph_node_waits_for_reserved_child_budget_to_be_refunded(tmp_pat
             run_id="parent",
             parent_limits=ParentRunLimits(
                 deadline=datetime.now(UTC) + timedelta(minutes=1),
-                remaining_turns=4,
+                remaining_model_steps=4,
                 remaining_output_tokens=3,
                 tool_concurrency=2,
             ),
@@ -299,25 +310,25 @@ def test_ready_graph_node_waits_for_reserved_child_budget_to_be_refunded(tmp_pat
     asyncio.run(scenario())
 
 
-def test_graph_and_workers_can_share_one_parent_child_budget_ledger(tmp_path: Path) -> None:
-    model = FakeOpenAIModel((text_batch("worker", "worker"), text_batch("graph", "graph")))
+def test_graph_and_subagents_can_share_one_parent_child_budget_ledger(tmp_path: Path) -> None:
+    model = FakeOpenAIModel((text_batch("subagent", "subagent"), text_batch("graph", "graph")))
     runner, agent = make_runner(model, tmp_path)
     ledger = BudgetLedger()
-    supervisor = Supervisor((Worker("worker", agent, runner),), budgets=ledger)
+    group = SubagentGroup((Subagent("subagent", agent, runner),), budgets=ledger)
     executor = GraphExecutor(budgets=ledger)
     context = ToolContext(
         call_id="delegate",
         run_id="parent",
         parent_limits=ParentRunLimits(
             deadline=datetime.now(UTC) + timedelta(minutes=1),
-            remaining_turns=3,
+            remaining_model_steps=3,
             remaining_output_tokens=5,
             tool_concurrency=1,
         ),
     )
 
     async def scenario() -> None:
-        await supervisor.run_worker("worker", "first", context)
+        await group.run_subagent("subagent", "first", context)
         result = await executor.execute(
             Graph(graph_id="shared", nodes=(Node("child", agent=agent, runner=runner),)), {}, context=context
         )
@@ -338,7 +349,7 @@ def test_restored_graph_budget_keeps_unknown_provider_usage_charged(tmp_path: Pa
         run_id="parent",
         parent_limits=ParentRunLimits(
             deadline=datetime.now(UTC) + timedelta(minutes=1),
-            remaining_turns=3,
+            remaining_model_steps=3,
             remaining_output_tokens=5,
             tool_concurrency=1,
         ),
@@ -383,7 +394,7 @@ def test_graph_timeout_charges_unknown_inflight_usage_and_cannot_release_active_
             run_id="parent",
             parent_limits=ParentRunLimits(
                 deadline=datetime.now(UTC) + timedelta(minutes=1),
-                remaining_turns=2,
+                remaining_model_steps=2,
                 remaining_output_tokens=5,
                 tool_concurrency=1,
             ),
@@ -391,7 +402,7 @@ def test_graph_timeout_charges_unknown_inflight_usage_and_cannot_release_active_
         executor = GraphExecutor()
         task = asyncio.create_task(executor.execute(graph, {}, context=context))
         await wait_for_event(model.started)
-        with pytest.raises(OrchestrationStateError, match="Active child reservations"):
+        with pytest.raises(BudgetStateError, match="Active child reservations"):
             # The host must not discard a live child's reserved allowance.
             executor.release_budget("parent")
         scope.reschedule(asyncio.get_running_loop().time())
@@ -399,7 +410,7 @@ def test_graph_timeout_charges_unknown_inflight_usage_and_cannot_release_active_
         assert result.status is GraphStatus.FAILED and result.error_code == "orchestration.graph.timed_out"
         assert result.child_usage is None
         saved = executor.budget_state("parent")
-        assert saved is not None and saved.remaining_output_tokens == 0 and saved.remaining_turns == 0
+        assert saved is not None and saved.remaining_output_tokens == 0 and saved.remaining_model_steps == 0
         executor.release_budget("parent")
         executor.release_budget("parent")
         assert executor.budget_state("parent") is None
@@ -661,7 +672,7 @@ def test_cancelling_a_node_start_notification_refunds_its_unused_parent_budget(t
             run_id="parent",
             parent_limits=ParentRunLimits(
                 deadline=datetime.now(UTC) + timedelta(minutes=1),
-                remaining_turns=2,
+                remaining_model_steps=2,
                 remaining_output_tokens=8,
                 tool_concurrency=1,
             ),
@@ -682,7 +693,7 @@ def test_cancelling_a_node_start_notification_refunds_its_unused_parent_budget(t
                 await task
         saved = executor.budget_state("parent")
         assert saved is not None
-        assert saved.remaining_turns == 2
+        assert saved.remaining_model_steps == 2
         assert saved.remaining_output_tokens == 8
         assert model.requests == []
 
@@ -755,13 +766,17 @@ def test_graph_recovery_retries_failed_nodes_without_rerunning_confirmed_nodes()
     assert calls == ["first", "second", "second"]
 
 
-def test_graph_pauses_blocked_downstream_and_resumes_without_repeating_confirmed_sibling() -> None:
+@pytest.mark.parametrize("budgeted", [True, False], ids=["parent-budget", "host-limits-only"])
+def test_graph_pauses_blocked_downstream_and_resumes_without_repeating_confirmed_sibling(
+    tmp_path: Path, budgeted: bool
+) -> None:
     calls: list[str] = []
-    events: list[GraphEvent] = []
-
-    async def source(input_value: JsonObject) -> JsonObject:
-        calls.append("source")
-        return {"value": 42}
+    model = FakeOpenAIModel(
+        (tool_batch("echo", '{"value":"approve"}', "source-call"), text_batch('{"value":42}', "final"))
+    )
+    runner, agent = make_runner(model, tmp_path, interrupting_tool)
+    schema: JsonSchema = {"type": "object", "properties": {"value": {"type": "integer"}}, "required": ["value"]}
+    source = replace(agent, output_schema=schema)
 
     async def sibling(input_value: JsonObject) -> JsonObject:
         calls.append("sibling")
@@ -771,43 +786,151 @@ def test_graph_pauses_blocked_downstream_and_resumes_without_repeating_confirmed
         calls.append("downstream")
         return input_value
 
-    async def collect(event: object) -> None:
-        assert isinstance(event, GraphEvent)
-        events.append(event)
-
-    class PausingExecutor:
-        async def execute(self, node: Node, input_value: JsonObject) -> NodeResult:
-            if node.node_id == "source":
-                return NodeResult(node_id=node.node_id, node_run_id="paused-source", status=NodeStatus.PAUSED)
-            return await node.run(input_value)
-
     graph = Graph(
         graph_id="paused-dependency",
         nodes=(
-            Node("source", handler=source),
+            Node(
+                "source",
+                agent=source,
+                runner=runner,
+                output_schema=schema,
+                side_effect=True,
+                limits=RunLimits(max_model_steps=3, max_output_tokens=20),
+            ),
             Node("sibling", handler=sibling),
             Node("downstream", handler=downstream),
         ),
         edges=(Edge("source-downstream", "source", "downstream", mappings=(EdgeMapping("/value", "/value"),)),),
     )
-    executor = GraphExecutor()
-    paused = asyncio.run(executor.execute(graph, {}, PausingExecutor(), event_sink=collect))
+    context = ToolContext(
+        call_id="graph-call",
+        run_id="parent",
+        parent_limits=ParentRunLimits(
+            deadline=datetime.now(UTC) + timedelta(minutes=1),
+            remaining_model_steps=4,
+            remaining_output_tokens=30,
+            tool_concurrency=2,
+        ),
+    )
 
-    assert paused.status is GraphStatus.PAUSED
-    states = {item.node_id: item.status for item in paused.state.node_states}
-    assert states == {"source": NodeStatus.PAUSED, "sibling": NodeStatus.SUCCEEDED, "downstream": NodeStatus.PENDING}
-    assert calls == ["sibling"]
-    assert events[-1].kind is GraphEventKind.GRAPH_PAUSED
+    if not budgeted:
+        context = context.model_copy(update={"parent_limits": None})
 
-    resumed = asyncio.run(executor.execute(graph, {}, state=paused.state))
+    async def scenario() -> None:
+        paused = await GraphExecutor().execute(graph, {}, context=context)
+        assert paused.status is GraphStatus.PAUSED
+        states = {item.node_id: item for item in paused.state.node_states}
+        assert states["sibling"].status is NodeStatus.SUCCEEDED
+        assert states["downstream"].status is NodeStatus.PENDING
+        checkpoint = states["source"].checkpoint
+        assert checkpoint is not None
+        assert paused.child_usage is not None and paused.child_usage.model_calls == 1
+        assert checkpoint.parent_run_id == context.run_id
+        if budgeted:
+            assert paused.state.budget is not None and len(paused.state.budget.reservations) == 1
+        else:
+            assert paused.state.budget is None and states["source"].reservation_id is None
+        with pytest.raises(GraphSystemFault, match="input changed"):
+            await GraphExecutor().execute(graph, {"changed": True}, state=paused.state, context=context)
+        assert len(model.requests) == 1
+        interruption = checkpoint.interruptions[0]
+        now = datetime.now(UTC)
+        decision = ResumeDecision(
+            interruption_id=interruption.interruption_id,
+            result=ToolResult(
+                call_id=interruption.call_id, ok=True, output={"approved": True}, started_at=now, finished_at=now
+            ),
+        )
+        resumed = await GraphExecutor().execute(
+            graph,
+            {},
+            state=paused.state,
+            context=context,
+            resumes=(NodeResume(node_id="source", decisions=(decision,)),),
+        )
+        assert resumed.status is GraphStatus.SUCCEEDED
+        assert resumed.outputs == {"downstream": {"value": 42}, "sibling": {"confirmed": True}}
+        assert resumed.state.node_states[0].node_run_id == checkpoint.run_id
+        assert resumed.child_usage is not None and resumed.child_usage.model_calls == 2
+        if budgeted:
+            assert resumed.state.budget is not None and resumed.state.budget.reservations == ()
+            assert resumed.state.budget.state.remaining_model_steps == 2
+        else:
+            assert resumed.state.budget is None
+        assert calls == ["sibling", "downstream"]
+        assert len(model.requests) == 2
 
-    assert resumed.status is GraphStatus.SUCCEEDED
-    assert resumed.outputs == {"downstream": {"value": 42}, "sibling": {"confirmed": True}}
-    assert calls == ["sibling", "source", "downstream"]
+    asyncio.run(scenario())
 
 
-def test_graph_node_can_run_a_worker_handoff_through_real_sdk_components(tmp_path: Path) -> None:
-    """Graph, Supervisor, and Handoff keep the child Run on one shared control path."""
+@pytest.mark.parametrize("budgeted", [True, False], ids=["parent-budget", "host-limits-only"])
+@pytest.mark.parametrize("bound", [True, False], ids=["bound-graph", "revoked-model-binding"])
+def test_cancelling_a_paused_graph_preserves_siblings_and_refunds_its_child_budget_once(
+    tmp_path: Path, bound: bool, budgeted: bool
+) -> None:
+    model = FakeOpenAIModel((tool_batch("echo", '{"value":"approve"}', "call-1"),))
+    runner, agent = make_runner(model, tmp_path, interrupting_tool)
+
+    async def sibling(input_value: JsonObject) -> JsonObject:
+        return {"confirmed": True}
+
+    graph = Graph(
+        graph_id="cancel-paused",
+        nodes=(Node("paused", agent=agent, runner=runner), Node("sibling", handler=sibling)),
+    )
+    context = ToolContext(
+        call_id="graph-call",
+        run_id="parent",
+        parent_limits=ParentRunLimits(
+            deadline=datetime.now(UTC) + timedelta(minutes=1),
+            remaining_model_steps=3,
+            remaining_output_tokens=20,
+            tool_concurrency=2,
+        ),
+    )
+
+    if not budgeted:
+        context = context.model_copy(update={"parent_limits": None})
+
+    async def scenario() -> None:
+        executor = GraphExecutor()
+        paused = await executor.execute(graph, {}, context=context)
+        checkpoint = paused.state.node_states[0].checkpoint
+        assert checkpoint is not None
+        for owner in (executor, executor, GraphExecutor()):
+            if bound:
+                result = await owner.cancel_paused(graph, paused.state, reason="user_cancelled")
+            else:
+                result = await owner.cancel_paused(
+                    None,
+                    paused.state,
+                    reason="user_cancelled",
+                    runner=runner,
+                    session_store=graph.nodes[0].session_store,
+                )
+            assert result.status is GraphStatus.CANCELLED
+            states = {item.node_id: item for item in result.state.node_states}
+            assert states["paused"].status is NodeStatus.CANCELLED
+            assert states["paused"].node_run_id == checkpoint.run_id
+            assert states["paused"].checkpoint is None
+            assert states["sibling"].status is NodeStatus.SUCCEEDED
+            assert states["sibling"].output == {"confirmed": True}
+            assert result.child_usage is not None and result.child_usage.model_calls == 1
+            if budgeted:
+                assert result.state.budget is not None and result.state.budget.reservations == ()
+                assert result.state.budget.state.remaining_model_steps == 2
+            else:
+                assert result.state.budget is None
+                assert owner.budgets.pools == {} and owner.budgets.reservations == {}
+        assert len(model.requests) == 1
+        snapshot = await graph.nodes[0].session_store.run(checkpoint.session_id, checkpoint.run_id)
+        assert snapshot.state is RunStatus.CANCELLED
+
+    asyncio.run(scenario())
+
+
+def test_graph_node_can_run_a_subagent_handoff_through_real_sdk_components(tmp_path: Path) -> None:
+    """Graph, SubagentGroup, and Handoff keep the child Run on one shared control path."""
     source_model = FakeOpenAIModel((tool_batch("transfer_to_reviewer", '{"task":"review"}', "handoff-call"),))
     target_model = FakeAnthropicModel((anthropic_text_batch("reviewed", "target-final"),))
     source_root = tmp_path / "source"
@@ -820,21 +943,22 @@ def test_graph_node_can_run_a_worker_handoff_through_real_sdk_components(tmp_pat
         name="transfer_to_reviewer",
         description="Transfer the current task to the reviewer.",
     ).bind(runner)
-    worker = Worker("reviewer-worker", source, runner, handoffs=(binding,))
-    supervisor = Supervisor((worker,))
+    subagent = Subagent("reviewer-subagent", source, runner, handoffs=(binding,))
+    group = SubagentGroup((subagent,))
 
-    async def worker_node(_: JsonObject) -> JsonObject:
-        result = await supervisor.run_worker(
-            worker,
+    async def subagent_node(input_value: JsonObject) -> JsonObject:
+        result = await group.run_subagent(
+            subagent,
             "review this graph input",
             ToolContext(call_id="graph-call", run_id="graph-run"),
         )
+        assert isinstance(result, RunResult)
         return {"text": result.final_output}
 
     graph = Graph(
         graph_id="composition",
-        nodes=(Node("worker", handler=worker_node),),
-        outputs=(OutputBinding("worker", "/text", "/text"),),
+        nodes=(Node("subagent", handler=subagent_node),),
+        outputs=(OutputBinding("subagent", "/text", "/text"),),
     )
 
     result = asyncio.run(GraphExecutor().execute(graph, {}))
@@ -843,8 +967,8 @@ def test_graph_node_can_run_a_worker_handoff_through_real_sdk_components(tmp_pat
     assert result.outputs == {"text": "reviewed"}
     assert len(source_model.requests) == 1
     assert len(target_model.requests) == 1
-    assert len(supervisor.records) == 1
-    assert next(iter(supervisor.records.values())).child_run_id is not None
+    assert len(group.records) == 1
+    assert next(iter(group.records.values())).child_run_id is not None
 
 
 def test_invalid_node_input_cancels_an_already_running_sibling_before_returning() -> None:
@@ -970,6 +1094,65 @@ def test_node_fault_preserves_original_exception_and_cleans_up_running_siblings(
         assert cleaned.is_set()
 
     asyncio.run(exercise())
+
+
+def test_unknown_external_node_result_is_persisted_and_cannot_be_replayed() -> None:
+    observed: list[str] = []
+
+    async def process_input(input_value: JsonObject) -> JsonObject:
+        return input_value
+
+    class ExternalProcess:
+        async def execute(
+            self,
+            node: Node,
+            input_value: JsonObject,
+            *,
+            checkpoint: RunCheckpoint | None = None,
+            decisions: tuple[ResumeDecision, ...] = (),
+        ) -> NodeResult:
+            observed.append(node.node_id)
+            return NodeResult(node_id=node.node_id, node_run_id="external-action", status=NodeStatus.UNKNOWN)
+
+    graph = Graph(
+        graph_id="unknown-result",
+        nodes=(Node("source", handler=process_input), Node("dependent", handler=process_input)),
+        edges=(Edge("source-dependent", "source", "dependent"),),
+    )
+
+    async def scenario() -> None:
+        result = await GraphExecutor().execute(graph, {}, ExternalProcess())
+        assert result.status is GraphStatus.FAILED
+        assert result.error_code == "orchestration.graph.recovery_unknown"
+        assert result.state.node_states[0].status is NodeStatus.UNKNOWN
+        assert result.state.node_states[0].node_run_id == "external-action"
+        assert result.state.node_states[1].status is NodeStatus.PENDING
+        with pytest.raises(GraphSystemFault, match="requires host reconciliation"):
+            await GraphExecutor().execute(graph, {}, ExternalProcess(), state=result.state)
+        assert observed == ["source"]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_graph_recovery_rejects_incomplete_or_duplicate_node_facts(duplicate: bool) -> None:
+    calls: list[str] = []
+
+    async def perform(input_value: JsonObject) -> JsonObject:
+        calls.append("performed")
+        return input_value
+
+    graph = Graph(graph_id="complete-facts", nodes=(Node("source", handler=perform),))
+
+    async def scenario() -> None:
+        result = await GraphExecutor().execute(graph, {})
+        states = (*result.state.node_states, *result.state.node_states) if duplicate else ()
+        invalid = result.state.model_copy(update={"node_states": states})
+        with pytest.raises(GraphSystemFault, match="missing or duplicate Node"):
+            await GraphExecutor().execute(graph, {}, state=invalid)
+        assert calls == ["performed"]
+
+    asyncio.run(scenario())
 
 
 def test_timeout_retains_a_side_effect_result_returned_during_cancellation(monkeypatch: pytest.MonkeyPatch) -> None:
