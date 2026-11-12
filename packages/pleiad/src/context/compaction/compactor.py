@@ -8,6 +8,7 @@ from pleiad.context.compaction.models import CompactionResult, CompactionState
 from pleiad.context.errors import ContextCompactionError, ContextWindowError
 from pleiad.context.rendering import ContextRenderer
 from pleiad.context.selection.models import ContextView
+from pleiad.messages.images import ImageBlock
 from pleiad.messages.message import Message, ToolMessage, UserMessage
 from pleiad.messages.results import MAX_INLINE_TOOL_RESULT_CHARS, ToolResultReference
 from pleiad.models.contracts import Tool
@@ -117,10 +118,13 @@ class ContextCompactor:
         tools: tuple[Tool, ...],
         context_view: ContextView,
     ) -> tuple[tuple[ModelStep, ...], tuple[ModelStep, ...]]:
-        """Select the newest complete ModelSteps within the explicit recent budget."""
-        selected: list[ModelStep] = []
-        for step in reversed(steps):
-            candidate = (step, *selected)
+        """Retain image steps and select recent complete steps within their shared budget."""
+        selected_sequences = {step.sequence for step in steps if step_has_images(step)}
+        for index, step in enumerate(reversed(steps)):
+            if step.sequence in selected_sequences:
+                continue
+            candidate_sequences = selected_sequences | {step.sequence}
+            candidate = tuple(value for value in steps if value.sequence in candidate_sequences)
             status = self.check(
                 instructions,
                 flatten_steps(candidate),
@@ -128,13 +132,15 @@ class ContextCompactor:
                 context_view,
                 input_messages,
             )
-            if not selected or status.input_tokens <= self.budget.budget.recent_tokens:
-                selected.insert(0, step)
+            if index == 0 or status.input_tokens <= self.budget.budget.recent_tokens:
+                selected_sequences.add(step.sequence)
             else:
                 break
-        selected_sequences = {step.sequence for step in selected}
-        older = tuple(step for step in steps if step.sequence not in selected_sequences)
-        return tuple(selected), older
+        retained = tuple(step for step in steps if step.sequence in selected_sequences)
+        # A summary cursor covers a contiguous prefix and must never cross a retained image step.
+        first_retained = retained[0].sequence if retained else None
+        older = tuple(step for step in steps if first_retained is None or step.sequence < first_retained)
+        return retained, older
 
     def check(
         self,
@@ -159,6 +165,16 @@ class ContextCompactor:
 def flatten_steps(steps: tuple[ModelStep, ...]) -> tuple[Message, ...]:
     """Flatten complete ModelSteps without changing their message order."""
     return tuple(message for step in steps for message in step.messages)
+
+
+def step_has_images(step: ModelStep) -> bool:
+    """Return whether a complete step contains an image that must remain visible."""
+    return any(
+        isinstance(block, ImageBlock)
+        for message in step.messages
+        if isinstance(message, UserMessage) and not isinstance(message.content, str)
+        for block in message.content
+    )
 
 
 def replace_old_tool_results(

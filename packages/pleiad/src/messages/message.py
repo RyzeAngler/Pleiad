@@ -4,6 +4,7 @@ from uuid import uuid4
 from pydantic import Field, TypeAdapter, field_validator, model_validator
 
 from pleiad.contracts import ContractModel
+from pleiad.messages.images import ImageBlock
 
 
 class TextBlock(ContractModel):
@@ -46,11 +47,13 @@ class UserMessage(MessageBase):
     """Represent user input accepted by the public Message boundary."""
 
     role: Literal["user"] = "user"
-    content: str | tuple[TextBlock, ...]
+    content: str | tuple[Annotated[TextBlock | ImageBlock, Field(discriminator="type")], ...]
 
     @field_validator("content")
     @classmethod
-    def validate_content(cls, value: str | tuple[TextBlock, ...]) -> str | tuple[TextBlock, ...]:
+    def validate_content(
+        cls, value: str | tuple[TextBlock | ImageBlock, ...]
+    ) -> str | tuple[TextBlock | ImageBlock, ...]:
         """Reject empty text and empty block collections."""
         if isinstance(value, str):
             if not value.strip():

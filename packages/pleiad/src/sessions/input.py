@@ -1,12 +1,13 @@
 import hashlib
 import json
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import AwareDatetime, Field, field_validator
 
 from pleiad.contracts import ContractModel
-from pleiad.messages.message import UserMessage
+from pleiad.messages.images import ImageBlock
+from pleiad.messages.message import TextBlock, UserMessage
 from pleiad.messages.results import ResultReference
 
 
@@ -16,15 +17,19 @@ class InputEnvelope(ContractModel):
     input_id: str = Field(min_length=1, max_length=256)
     kind: Literal["user", "observation", "delegate_result", "operation_result"]
     source: str = Field(min_length=1, max_length=512)
-    content: str | ResultReference
+    content: str | ResultReference | tuple[Annotated[TextBlock | ImageBlock, Field(discriminator="type")], ...]
     causation_id: str | None = Field(default=None, min_length=1, max_length=256)
 
     @field_validator("content")
     @classmethod
-    def validate_content(cls, value: str | ResultReference) -> str | ResultReference:
+    def validate_content(
+        cls, value: str | ResultReference | tuple[TextBlock | ImageBlock, ...]
+    ) -> str | ResultReference | tuple[TextBlock | ImageBlock, ...]:
         """Reject an empty accepted input before claiming it into a Run."""
         if isinstance(value, str) and not value.strip():
             raise ValueError("Session inputs require nonempty content")
+        if isinstance(value, tuple) and not value:
+            raise ValueError("Session inputs require at least one content block")
         return value
 
     def payload_digest(self) -> str:
@@ -35,6 +40,9 @@ class InputEnvelope(ContractModel):
 
     def message(self) -> UserMessage:
         """Project this input into its stable model-visible message identity."""
+        if isinstance(self.content, tuple):
+            metadata = self.model_dump_json(exclude={"content"})
+            return UserMessage(message_id=self.input_id, content=(TextBlock(text=metadata), *self.content))
         return UserMessage(message_id=self.input_id, content=self.model_dump_json())
 
 

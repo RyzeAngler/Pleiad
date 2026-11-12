@@ -43,6 +43,7 @@ from pleiad.events.runtime import (
     ToolStartedEvent,
 )
 from pleiad.logging.context import bind_log_context
+from pleiad.messages.images import ImageBlock, ImageLimits, ImageReadScope, ImageResolver, ResolvedImage, resolve_images
 from pleiad.messages.message import AssistantMessage, ToolMessage, UserMessage
 from pleiad.messages.message import ToolCall as MessageToolCall
 from pleiad.models.anthropic.client import AnthropicModelClient
@@ -135,6 +136,8 @@ class AgentLoop:
         handoff_count: int = 0,
         parent_run_id: str | None = None,
         max_handoffs: int = 8,
+        image_resolver: ImageResolver | None = None,
+        image_limits: ImageLimits | None = None,
     ) -> LoopOutcome:
         """Continue one Run until success, control completion, interruption, or failure."""
         current_step_id = active_step_id
@@ -277,12 +280,32 @@ class AgentLoop:
                         input_messages=input_messages,
                         context_view=compacted.context_view,
                     )
+                    image_references = tuple(
+                        block.image
+                        for message in request_messages
+                        if isinstance(message, UserMessage) and isinstance(message.content, tuple)
+                        for block in message.content
+                        if isinstance(block, ImageBlock)
+                    )
+                    resolved_images: tuple[ResolvedImage, ...] = ()
+                    if image_references:
+                        if model.image_input == "unsupported":
+                            raise ValueError("the configured model binding does not support image input")
+                        if image_resolver is None:
+                            raise ValueError("image inputs require a host image resolver")
+                        resolved_images = await resolve_images(
+                            image_references,
+                            image_resolver,
+                            ImageReadScope(session_id=memory.session_id, run_id=run_id),
+                            ImageLimits() if image_limits is None else image_limits,
+                        )
                     model_input = build_model_input(
                         instructions=request_instructions,
                         messages=request_messages,
                         tools=model_tools,
                         max_output_tokens=output_token_limit(remaining_output_tokens, agent),
                         output_schema=agent.output_schema,
+                        resolved_images=resolved_images,
                     )
                     logger.debug(
                         f"model call started step={current_usage.model_calls + 1} "

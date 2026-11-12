@@ -1,6 +1,7 @@
 import logging
 
 from pleiad.context.selection.models import ContextView
+from pleiad.messages.images import ImageBlock
 from pleiad.messages.message import Message, TextBlock, UserMessage
 
 logger = logging.getLogger(__name__)
@@ -27,13 +28,14 @@ class ContextRenderer:
         references = "\n\n".join(
             f"[reference kind={block.kind} origin={block.origin}]\n{block.content}" for block in context_view.blocks
         )
+        content: tuple[TextBlock | ImageBlock, ...]
         if isinstance(user_message.content, str):
-            request_content = user_message.content
+            rendered = f"<context>\n{references}\n</context>\n\n<request>\n{user_message.content}\n</request>"
+            content = (TextBlock(text=rendered),)
         else:
-            request_content = "\n".join(block.text for block in user_message.content)
-        rendered = f"<context>\n{references}\n</context>\n\n<request>\n{request_content}\n</request>"
+            content = (TextBlock(text=f"<context>\n{references}\n</context>"), *user_message.content)
         logger.debug(f"context rendered blocks={len(context_view.blocks)}")
-        return user_message.model_copy(update={"content": (TextBlock(text=rendered),)})
+        return user_message.model_copy(update={"content": content})
 
     def render_messages(
         self,

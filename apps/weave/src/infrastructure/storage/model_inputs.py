@@ -66,8 +66,8 @@ def input_envelope(item: InboxItem) -> InputEnvelope:
 def input_projection(item: InboxItem) -> JsonObject:
     """Project input provenance and bounded content without altering its stored bytes."""
     result = JSON_OBJECT.validate_python(item.model_dump(mode="json"))
-    content = input_envelope(item).content
-    result["content"] = content if isinstance(content, str) else content.model_dump(mode="json")
+    envelope = JSON_OBJECT.validate_python(input_envelope(item).model_dump(mode="json"))
+    result["content"] = envelope["content"]
     return result
 
 

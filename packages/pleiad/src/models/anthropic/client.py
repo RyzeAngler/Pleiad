@@ -1,12 +1,14 @@
+import os
 from collections.abc import AsyncIterator, Mapping
 from importlib import import_module
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 from pydantic import SecretStr, ValidationError
 
 from pleiad.contracts import JsonValue
 from pleiad.models.anthropic.request import AnthropicRequest, parse_request
 from pleiad.models.anthropic.response import AnthropicResponse, AnthropicStreamEvent
+from pleiad.models.binding import binding_fingerprint
 from pleiad.models.errors import ModelConfigurationError, ModelRequestError
 
 
@@ -38,6 +40,7 @@ class AnthropicModelClient:
         max_retries: int = 2,
         provider_options: Mapping[str, JsonValue] | None = None,
         headers: Mapping[str, str] | None = None,
+        image_input: Literal["supported", "unsupported", "unverified"] = "unverified",
     ) -> None:
         """Create an Anthropic protocol object for one provider.
 
@@ -50,6 +53,7 @@ class AnthropicModelClient:
             max_retries: SDK retry limit.
             provider_options: Vendor-specific SDK options.
             headers: Additional vendor request headers.
+            image_input: Host-verified image capability for this exact model binding.
         Raises:
             ModelConfigurationError: If the provider package or binding is unavailable.
             ValueError: If the client configuration is invalid.
@@ -66,10 +70,29 @@ class AnthropicModelClient:
         self.model = model
         self.api_key = api_key if isinstance(api_key, SecretStr) else SecretStr(api_key)
         self.base_url = base_url
+        if self.base_url is None and provider == "anthropic":
+            self.base_url = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
         self.provider_options = dict(provider_options) if provider_options is not None else {}
         self.headers = dict(headers) if headers is not None else {}
+        if image_input not in {"supported", "unsupported", "unverified"}:
+            raise ValueError("invalid image input capability state")
+        self.image_input = image_input
+        self.binding_fingerprint = binding_fingerprint(
+            protocol="anthropic",
+            provider=provider,
+            base_url=self.base_url,
+            model=model,
+            provider_options={
+                "request": self.provider_options,
+                "timeout_seconds": timeout_seconds,
+                "max_retries": max_retries,
+                "image_input": image_input,
+            },
+            headers=self.headers,
+            secrets=(self.api_key.get_secret_value(),),
+        )
         self.binding = self.load_provider()
 
     async def complete(self, request: AnthropicRequest | Mapping[str, object]) -> AnthropicResponse:

@@ -1,5 +1,6 @@
 from pleiad.context.rendering import ContextRenderer
 from pleiad.context.selection.models import ContextBlock, ContextView
+from pleiad.messages.images import ImageBlock, ImageReference
 from pleiad.messages.message import AssistantMessage, TextBlock, ToolCall, ToolMessage, UserMessage
 
 
@@ -12,9 +13,10 @@ def test_context_renderer_keeps_dynamic_references_request_local() -> None:
 
     assert original.content == (TextBlock(text="Answer this."), TextBlock(text="attached"))
     assert not isinstance(rendered.content, str)
+    assert isinstance(rendered.content[0], TextBlock)
     assert "<context>" in rendered.content[0].text
     assert "origin=doc-1" in rendered.content[0].text
-    assert "<request>\nAnswer this.\nattached\n</request>" in rendered.content[0].text
+    assert rendered.content[1:] == original.content
 
 
 def test_context_references_survive_when_compaction_keeps_no_user_message() -> None:
@@ -41,3 +43,21 @@ def test_context_renderer_preserves_every_current_input_and_labels_references_on
     assert tuple(value.message_id for value in rendered) == ("first", "second")
     assert rendered[-1].content != second.content
     assert second.content == "supplement"
+
+
+def test_render_preserves_image_order() -> None:
+    image = ImageBlock(
+        image=ImageReference(reference="asset:product", sha256="a" * 64, mime="image/png", width=12, height=8)
+    )
+    original = UserMessage(message_id="attachment", content=(TextBlock(text="before"), image, TextBlock(text="after")))
+    view = ContextView((ContextBlock(kind="knowledge", origin="product", content="Product notes"),))
+
+    rendered = ContextRenderer().render(original, context_view=view)
+
+    assert rendered.message_id == original.message_id
+    assert not isinstance(rendered.content, str)
+    assert rendered.content[1:] == original.content
+    assert rendered.content[2] == image
+    assert isinstance(rendered.content[0], TextBlock)
+    assert rendered.content[0].text == "<context>\n[reference kind=knowledge origin=product]\nProduct notes\n</context>"
+    assert original.content == (TextBlock(text="before"), image, TextBlock(text="after"))

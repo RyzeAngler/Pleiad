@@ -11,7 +11,7 @@ requires-python = ">=3.12,<3.13"
 license = "MIT"
 license-files = ["LICENSE"]
 dependencies = [
-    "pleiad[mcp]==0.1.2",
+    "pleiad[mcp]==0.2.0",
     "opentelemetry-api>=1.44.0,<2.0.0",
     "fastapi>=0.116.0,<1.0.0",
     "httpx[socks]>=0.28.1,<1.0.0",
@@ -25,15 +25,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-openai = ["pleiad[openai]==0.1.2"]
-anthropic = ["pleiad[anthropic]==0.1.2"]
-glm = ["pleiad[glm]==0.1.2"]
-qwen = ["pleiad[qwen]==0.1.2"]
-kimi = ["pleiad[kimi]==0.1.2"]
-deepseek = ["pleiad[deepseek]==0.1.2"]
-minimax = ["pleiad[minimax]==0.1.2"]
-observability = ["pleiad[observability]==0.1.2"]
-models = ["pleiad[models]==0.1.2"]
+openai = ["pleiad[openai]==0.2.0"]
+anthropic = ["pleiad[anthropic]==0.2.0"]
+glm = ["pleiad[glm]==0.2.0"]
+qwen = ["pleiad[qwen]==0.2.0"]
+kimi = ["pleiad[kimi]==0.2.0"]
+deepseek = ["pleiad[deepseek]==0.2.0"]
+minimax = ["pleiad[minimax]==0.2.0"]
+observability = ["pleiad[observability]==0.2.0"]
+models = ["pleiad[models]==0.2.0"]
 
 [project.scripts]
 pleiad = "pleiad_weave.cli:app"

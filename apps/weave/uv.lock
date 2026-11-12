@@ -1195,7 +1195,7 @@ wheels = [
 
 [[package]]
 name = "pleiad"
-version = "0.1.2"
+version = "0.2.0"
 source = { editable = "../../packages/pleiad" }
 dependencies = [
     { name = "jsonschema" },
@@ -1277,6 +1277,7 @@ requires-dist = [
     { name = "httpx", extras = ["socks"], marker = "extra == 'models'", specifier = ">=0.28.1,<1.0.0" },
     { name = "httpx", extras = ["socks"], marker = "extra == 'openai'", specifier = ">=0.28.1,<1.0.0" },
     { name = "httpx", extras = ["socks"], marker = "extra == 'qwen'", specifier = ">=0.28.1,<1.0.0" },
+    { name = "httpx", extras = ["socks"], marker = "extra == 'volcengine'", specifier = ">=0.28.1,<1.0.0" },
     { name = "jsonschema", specifier = ">=4.25.0,<5.0.0" },
     { name = "langfuse", marker = "extra == 'observability'", specifier = ">=4.15.4,<5.0.0" },
     { name = "openai", marker = "extra == 'deepseek'", specifier = ">=2.0.0,<3.0.0" },
@@ -1284,6 +1285,7 @@ requires-dist = [
     { name = "openai", marker = "extra == 'minimax'", specifier = ">=2.0.0,<3.0.0" },
     { name = "openai", marker = "extra == 'models'", specifier = ">=2.0.0,<3.0.0" },
     { name = "openai", marker = "extra == 'openai'", specifier = ">=2.0.0,<3.0.0" },
+    { name = "openai", marker = "extra == 'volcengine'", specifier = ">=2.0.0,<3.0.0" },
     { name = "opentelemetry-api", specifier = ">=1.44.0,<2.0.0" },
     { name = "opentelemetry-sdk", marker = "extra == 'observability'", specifier = ">=1.44.0,<2.0.0" },
     { name = "pydantic", specifier = ">=2.12.0,<3.0.0" },
@@ -1291,7 +1293,7 @@ requires-dist = [
     { name = "zai-sdk", marker = "extra == 'glm'", specifier = ">=0.2.3,<0.3.0" },
     { name = "zai-sdk", marker = "extra == 'models'", specifier = ">=0.2.3,<0.3.0" },
 ]
-provides-extras = ["openai", "anthropic", "glm", "qwen", "kimi", "deepseek", "minimax", "models", "mcp", "observability"]
+provides-extras = ["openai", "anthropic", "glm", "qwen", "kimi", "deepseek", "minimax", "volcengine", "models", "mcp", "observability"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1304,6 +1306,7 @@ dev = [
     { name = "mypy", specifier = ">=1.17.0,<2.0.0" },
     { name = "openai", specifier = ">=2.0.0,<3.0.0" },
     { name = "opentelemetry-sdk", specifier = ">=1.44.0,<2.0.0" },
+    { name = "pillow", specifier = ">=12.3.0,<13.0.0" },
     { name = "pytest", specifier = ">=8.4.0,<9.0.0" },
     { name = "ruff", specifier = "==0.15.22" },
     { name = "types-jsonschema", specifier = ">=4.25.0,<5.0.0" },

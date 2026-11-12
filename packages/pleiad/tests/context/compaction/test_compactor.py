@@ -12,6 +12,7 @@ from pleiad.context.errors import ContextWindowError
 from pleiad.context.rendering import ContextRenderer
 from pleiad.context.selection.models import ContextBlock, ContextView
 from pleiad.contracts import JsonObject
+from pleiad.messages.images import ImageBlock, ImageReference
 from pleiad.messages.message import AssistantMessage, ToolCall, ToolMessage, UserMessage
 from pleiad.messages.results import ToolResultReference
 from pleiad.runtime.execution.read_tool_result import ReadToolResultTool
@@ -384,5 +385,115 @@ def test_a_real_host_summary_requires_an_updater_when_another_old_step_is_omitte
                 context_view=ContextView(),
                 prior_state=first.state,
             )
+
+    asyncio.run(scenario())
+
+
+def image_tool_step(sequence: int) -> ModelStep:
+    image = ImageBlock(
+        image=ImageReference(reference=f"asset:{sequence}", sha256="a" * 64, mime="image/png", width=100, height=100)
+    )
+    return ModelStep(
+        step_id=f"image-step-{sequence}",
+        run_id="run",
+        run_sequence=sequence,
+        sequence=sequence,
+        agent_id="assistant",
+        state="completed",
+        messages=(
+            UserMessage(message_id=f"image-user-{sequence}", content=(image,)),
+            AssistantMessage(
+                message_id=f"image-assistant-{sequence}",
+                tool_calls=(ToolCall(id=f"inspect-{sequence}", name="inspect", arguments="{}"),),
+            ),
+            ToolMessage(message_id=f"image-result-{sequence}", tool_call_id=f"inspect-{sequence}", content="checked"),
+        ),
+    )
+
+
+def test_compaction_retains_image_steps() -> None:
+    image_step = image_tool_step(2)
+    latest = completed_step(5)
+    budget = ContextBudget(window_tokens=20, output_reserve=2, compact_at=6, recent_tokens=5)
+
+    compacted = asyncio.run(
+        ContextCompactor(BudgetGuard(budget, MessageCountCounter())).compact(
+            (completed_step(1), image_step, completed_step(3), completed_step(4), latest),
+            instructions="rules",
+            input_messages=(),
+            tools=(),
+            context_view=ContextView(),
+            summarizer=summarize,
+        )
+    )
+
+    assert compacted.messages == (*image_step.messages, *latest.messages)
+    assert compacted.state == CompactionState(summary="omitted=1 previous=none", through_sequence=1)
+
+
+def test_compaction_prioritizes_images() -> None:
+    image_step = image_tool_step(1)
+    latest = completed_step(4)
+    budget = ContextBudget(window_tokens=7, output_reserve=1, compact_at=5, recent_tokens=4)
+
+    compacted = asyncio.run(
+        ContextCompactor(BudgetGuard(budget, MessageCountCounter())).compact(
+            (image_step, completed_step(2), completed_step(3), latest),
+            instructions="rules",
+            input_messages=(),
+            tools=(),
+            context_view=ContextView(),
+        )
+    )
+
+    assert compacted.messages == (*image_step.messages, *latest.messages)
+    assert compacted.budget.input_tokens == 5
+    assert not compacted.budget.exceeds_window
+
+
+def test_compaction_rejects_image_overflow() -> None:
+    budget = ContextBudget(window_tokens=7, output_reserve=1, compact_at=5, recent_tokens=4)
+
+    with pytest.raises(ContextWindowError):
+        asyncio.run(
+            ContextCompactor(BudgetGuard(budget, MessageCountCounter())).compact(
+                (image_tool_step(1), image_tool_step(2)),
+                instructions="rules",
+                input_messages=(UserMessage(content="compare both images"),),
+                tools=(),
+                context_view=ContextView(),
+            )
+        )
+
+
+def test_summary_stops_before_image() -> None:
+    async def scenario() -> None:
+        image_step = image_tool_step(2)
+        steps = (completed_step(1), image_step, completed_step(3), completed_step(4))
+        budget = ContextBudget(window_tokens=20, output_reserve=2, compact_at=6, recent_tokens=5)
+        compactor = ContextCompactor(BudgetGuard(budget, MessageCountCounter()))
+        first = await compactor.compact(
+            steps,
+            instructions="rules",
+            input_messages=(),
+            tools=(),
+            context_view=ContextView(),
+            summarizer=summarize,
+        )
+        assert first.state is not None
+        restored_state = CompactionState.model_validate_json(first.state.model_dump_json())
+        following = await compactor.compact(
+            (*steps, completed_step(5)),
+            instructions="rules",
+            input_messages=(),
+            tools=(),
+            context_view=ContextView(),
+            prior_state=restored_state,
+            summarizer=summarize,
+        )
+
+        assert following.messages == (*image_step.messages, *completed_step(5).messages)
+        assert following.state == restored_state
+        assert restored_state.through_sequence == 1
 
     asyncio.run(scenario())

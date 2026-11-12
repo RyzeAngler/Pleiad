@@ -12,6 +12,7 @@ from opentelemetry.sdk.metrics.export import Gauge, Histogram, InMemoryMetricRea
 from pleiad.contracts import JsonObject
 from pleiad.messages.message import AssistantMessage, ToolCall
 from pleiad.messages.results import ResultReference
+from pleiad.models.binding import binding_fingerprint
 from pleiad.models.openai.client import OpenAIModelClient
 from pleiad.models.openai.request import OpenAIRequest
 from pleiad.models.openai.response import (
@@ -68,8 +69,12 @@ JSON_OBJECT = TypeAdapter[JsonObject](JsonObject)
 class ProductScenarioModel(OpenAIModelClient):
     def __init__(self) -> None:
         self.provider = "fake"
+        self.image_input = "unverified"
         self.api_key = SecretStr("")
         self.model = "scenario-model"
+        self.binding_fingerprint = binding_fingerprint(
+            protocol="openai", provider=self.provider, model=self.model, base_url=None, provider_options={}
+        )
         self.requests: list[OpenAIRequest] = []
         self.workers_started = 0
         self.workers_ready = asyncio.Event()

@@ -7,6 +7,7 @@ from typing import Protocol, runtime_checkable
 import aiohttp
 from anthropic import AnthropicError, AsyncAnthropic
 from dashscope.aigc.generation import AioGeneration
+from dashscope.aigc.multimodal_conversation import AioMultiModalConversation
 from dashscope.common.error import DashScopeException
 from httpx import TimeoutException, TransportError
 from pydantic import SecretStr
@@ -91,6 +92,10 @@ class OpenAIProvider:
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
         self.provider_options = dict(provider_options)
+        multimodal = self.provider_options.pop("multimodal", False)
+        if not isinstance(multimodal, bool):
+            raise ValueError("Qwen multimodal must be a boolean")
+        self.multimodal = multimodal
         self.headers = dict(headers)
 
     async def complete(self, request: OpenAIRequest) -> OpenAIResponse:
@@ -130,6 +135,9 @@ class OpenAIProvider:
     async def responses(self, request: OpenAIRequest) -> AsyncGenerator[OpenAIResponse | OpenAIStreamChunk]:
         """Call DashScope and project its envelope into OpenAI response shapes."""
         payload = dashscope_payload(request, self.model, self.provider_options)
+        multimodal = self.multimodal or has_images(request)
+        if multimodal:
+            payload["messages"] = multimodal_messages(payload["messages"])
         payload["result_format"] = "message"
         payload["incremental_output"] = request.stream
         payload["base_address"] = self.base_url
@@ -143,7 +151,9 @@ class OpenAIProvider:
         for attempt in range(self.max_retries + 1):
             try:
                 async with aiohttp.ClientSession() as session:
-                    call: Callable[..., Awaitable[object]] = AioGeneration.call
+                    call: Callable[..., Awaitable[object]] = (
+                        AioMultiModalConversation.call if multimodal else AioGeneration.call
+                    )
                     raw = await call(**payload, session=session)
                     if request.stream:
                         if not isinstance(raw, QwenRawStream):
@@ -305,15 +315,13 @@ def normalize_envelope(raw: object, *, model: str, streaming: bool) -> Mapping[s
     elif isinstance(choices, list | tuple):
         for choice in choices:
             message = read_field(choice, "message")
-            delta = read_field(choice, "delta")
-            value = delta if streaming else message
-            if value is None:
+            if message is None:
                 raise ValueError("Qwen response choice is missing message")
             projected_choices.append(
                 {
                     "index": read_field(choice, "index") if read_field(choice, "index") is not None else 0,
                     "finish_reason": read_field(choice, "finish_reason"),
-                    "delta" if streaming else "message": value,
+                    "delta" if streaming else "message": normalize_message(message),
                 },
             )
     else:
@@ -357,13 +365,101 @@ def dashscope_payload(
         )
     if request.max_completion_tokens is not None:
         payload["max_tokens"] = request.max_completion_tokens
-    for name in ("stream_options", "user", "metadata"):
+    # DashScope includes native usage without an OpenAI stream_options argument.
+    options = payload.pop("stream_options", None)
+    if options is not None and (
+        not isinstance(options, dict)
+        or set(options) != {"include_usage"}
+        or not isinstance(options["include_usage"], bool)
+    ):
+        raise ModelUnsupportedError("Qwen supports only include_usage in stream_options.")
+    for name in ("user", "metadata"):
         if name in payload:
             raise ModelUnsupportedError(
                 f"Qwen does not support the OpenAI request field: {name}.",
             )
     payload.pop("max_completion_tokens", None)
     return payload
+
+
+def has_images(request: OpenAIRequest) -> bool:
+    """Identify image input without guessing capabilities from model names."""
+    for message in request.messages:
+        if isinstance(message.content, list):
+            for block in message.content:
+                if isinstance(block, dict) and block.get("type") == "image_url":
+                    return True
+    return False
+
+
+def multimodal_messages(messages: JsonValue) -> list[JsonValue]:
+    """Convert validated OpenAI messages to DashScope's native image blocks.
+
+    Args:
+        messages: Serialized OpenAI messages with ordered text and image parts.
+
+    Returns:
+        Detached native messages retaining tool-call and result identities.
+
+    Raises:
+        ModelRequestError: If the messages are malformed.
+        ModelUnsupportedError: If a block has no supported native equivalent.
+    """
+    if not isinstance(messages, list):
+        raise ModelRequestError("Qwen messages must be a list.")
+    projected: list[JsonValue] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            raise ModelRequestError("Qwen messages must contain objects.")
+        native = dict(message)
+        content = native.get("content")
+        if isinstance(content, str):
+            native["content"] = [{"text": content}]
+        elif isinstance(content, list):
+            native["content"] = [multimodal_block(block) for block in content]
+        projected.append(native)
+    return projected
+
+
+def multimodal_block(block: JsonValue) -> JsonObject:
+    """Translate one image or text block, rejecting unmapped input semantics."""
+    if not isinstance(block, dict):
+        raise ModelRequestError("Qwen content blocks must be objects.")
+    if block.get("type") == "text" and set(block) == {"type", "text"}:
+        text = block["text"]
+        if not isinstance(text, str):
+            raise ModelRequestError("Qwen text content must be a string.")
+        return {"text": text}
+    if block.get("type") == "image_url" and set(block) == {"type", "image_url"}:
+        image = block["image_url"]
+        if isinstance(image, dict) and set(image) == {"url"}:
+            url = image["url"]
+            if isinstance(url, str) and url.startswith(("https://", "http://", "data:image/")):
+                return {"image": url}
+    raise ModelUnsupportedError("Qwen native image input supports only text and image_url.url blocks.")
+
+
+def normalize_message(message: object) -> Mapping[str, object]:
+    """Project DashScope message content and incremental tool calls to OpenAI."""
+    projected: dict[str, object] = {}
+    for name in ("role", "reasoning_content", "tool_calls"):
+        value = read_field(message, name)
+        if value is not None:
+            projected[name] = value
+    content = read_field(message, "content")
+    if isinstance(content, list | tuple):
+        parts: list[str] = []
+        for block in content:
+            if not isinstance(block, Mapping) or set(block) != {"text"}:
+                raise ModelResponseError("The Qwen conversation returned unsupported content.")
+            text = block["text"]
+            if not isinstance(text, str):
+                raise ModelResponseError("The Qwen conversation returned invalid text.")
+            parts.append(text)
+        projected["content"] = "".join(parts)
+    else:
+        projected["content"] = content
+    return projected
 
 
 def read_field(value: object, name: str) -> object:

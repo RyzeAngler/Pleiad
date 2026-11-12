@@ -35,8 +35,6 @@ async def start_agent(
     selected = Session(f"test:{invocation_id}", InMemorySessionStore()) if session is None else session
     input_id = user_input.message_id if isinstance(user_input, UserMessage) else f"{invocation_id}:input"
     content = user_input.content if isinstance(user_input, UserMessage) else user_input
-    if not isinstance(content, str):
-        raise ValueError("The text Session input contract requires string content")
     await selected.enqueue(InputEnvelope(input_id=input_id, kind="user", source="test", content=content))
     return await runner.start(
         agent,

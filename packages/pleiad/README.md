@@ -36,6 +36,7 @@ vendor SDK call and the conversion at that boundary:
 | `qwen` | DashScope SDK | Anthropic SDK |
 | `kimi` | OpenAI SDK | Anthropic SDK |
 | `minimax` | OpenAI SDK | Anthropic SDK |
+| `volcengine` | OpenAI SDK via Ark Chat API | — |
 
 For example, this remains an OpenAI request even though DeepSeek is the
 provider:
@@ -66,6 +67,253 @@ Runtime, and invalid output fails the Run. Direct model-client callers must
 validate the returned JSON against their schema themselves. See DeepSeek's
 [Chat Completions contract](https://api-docs.deepseek.com/api/create-chat-completion/)
 and [JSON Output guide](https://api-docs.deepseek.com/guides/json_mode/).
+
+## Image input and image operations
+
+For opt-in calls using your API credentials and real local images, see the
+[live test guide](../../docs/pleiad-live-image-tests.md) and
+[configuration template](tests/models/live.example.toml). Put `base_url` and
+`api_key` in each TOML section, then pass `--live-config /absolute/path/config.toml`
+to the selected pytest case. No environment-variable setup is needed for this
+test entry point. The three real-provider cases skip without that option and save
+responses and images for inspection when enabled.
+
+`pleiad.messages.images.ImageReference` identifies immutable host-owned content.
+`ImageBlock` mixes with `TextBlock` in `UserMessage` and `InputEnvelope`.
+The host injects an asynchronous resolver into `Runner`. Every request, including
+a text-only follow-up or resumed Run, authorizes retained images again and checks
+their SHA-256, metadata and physical limits before model admission.
+
+These APIs are included in Pleiad 0.2.0. Install `pleiad[models]==0.2.0`
+for all model adapters, or `pleiad[volcengine]==0.2.0` for Ark. For a source checkout, run
+`uv sync --project packages/pleiad --locked --all-groups --all-extras` from the
+repository root, then use `uv run --project packages/pleiad --frozen python`.
+The following example uses a known one-pixel PNG. Set
+`PLEIAD_EXAMPLE_API_KEY` and `PLEIAD_EXAMPLE_MODEL` to an image-capable conversation
+model, then run the Python code. Executing it sends one provider request.
+
+```python
+import asyncio
+import base64
+import hashlib
+import os
+
+from pleiad.agent.agent import Agent
+from pleiad.context.budget import ApproximateTokenCounter
+from pleiad.messages.images import ImageBlock, ImageReadScope, ImageReference, ResolvedImage
+from pleiad.messages.message import TextBlock
+from pleiad.models.openai.client import OpenAIModelClient
+from pleiad.runtime.limits import RunLimits
+from pleiad.runtime.runner import Runner
+from pleiad.sessions.backends.in_memory import InMemorySessionStore
+from pleiad.sessions.input import InputEnvelope
+from pleiad.sessions.session import Session
+from pleiad.skills.loader import SkillLoader
+from pleiad.tools.registry import ToolRegistry
+from pleiad.tools.runtime import ToolRuntime
+
+PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+)
+IMAGE = ImageReference(
+    reference="asset:example-pixel", sha256=hashlib.sha256(PNG).hexdigest(),
+    mime="image/png", width=1, height=1,
+)
+
+
+async def resolve_image(image: ImageReference, scope: ImageReadScope) -> ResolvedImage:
+    if scope.session_id != "image-example" or image != IMAGE:
+        raise PermissionError("Image is outside this Session's asset scope")
+    return ResolvedImage(image=image, data=PNG)
+
+
+async def main() -> None:
+    model = OpenAIModelClient(
+        provider="openai", model=os.environ["PLEIAD_EXAMPLE_MODEL"],
+        api_key=os.environ["PLEIAD_EXAMPLE_API_KEY"], max_retries=0,
+    )
+    try:
+        runner = Runner(
+            tools=ToolRegistry(), skills=SkillLoader(), tool_runtime=ToolRuntime(),
+            image_resolver=resolve_image,
+            token_counter=ApproximateTokenCounter(allow_unestimated_images=True),
+        )
+        session = Session("image-example", InMemorySessionStore())
+        await session.enqueue(InputEnvelope(
+            input_id="image-1", kind="user", source="example",
+            content=(ImageBlock(image=IMAGE), TextBlock(text="Describe this pixel's color.")),
+        ))
+        handle = await runner.start(
+            Agent(name="vision", model=model, prompt="Inspect the provided image.", tools=()),
+            session=session, invocation_id="inspect-1", input_ids=("image-1",),
+            input_mode="batch", limits=RunLimits(),
+        )
+        async with handle:
+            print(await handle.result())
+    finally:
+        await model.aclose()
+
+
+asyncio.run(main())
+```
+
+Production resolvers must authorize the supplied Session/Run, decode their assets,
+verify MIME and dimensions, and return the original content. Asset retention must
+include historical Session and unsettled operation references. `ImageLimits`
+applies count, dimensions, individual bytes and total bytes independently of tokens.
+
+The example explicitly permits unknown image token costs. By default,
+`ApproximateTokenCounter` raises `ImageTokenEstimateError` when a model-specific
+estimate is unavailable. Supply `image_token_estimator` for an established model
+rule. `BudgetStatus.image_tokens=None` and `unestimated_images` expose incomplete
+estimates when the host permits them. A host estimator must be valid for every
+model binding using that Runner, including Handoffs. Custom `TokenCounter`
+implementations own the complete estimate.
+
+Context rendering preserves block order. Compaction pins image-bearing complete
+ModelSteps, including their paired Tool messages. If retained images cannot fit,
+the Run fails with a context-window error. Session stores stable references,
+while request-local base64 is created at the protocol boundary.
+
+| Interface | Implemented wire behavior | Exact model support |
+| --- | --- | --- |
+| OpenAI Chat Completions | Ordered text and image_url data URLs | Host-declared, default unverified |
+| Anthropic Messages | Ordered text and base64 image/source blocks | Host-declared, default unverified |
+| OpenAI Images | Generation and ordered reference editing | Host-declared, default unverified |
+
+Image input and image generation have separate provider coverage:
+
+| Provider | Conversation image input | Image generation/editing |
+| --- | --- | --- |
+| OpenAI | Chat Completions via OpenAI SDK | OpenAI Images subset implemented |
+| Anthropic | Messages via Anthropic SDK | No image generation client |
+| Qwen | Native DashScope multimodal endpoint | Native synchronous generation and reference editing |
+| GLM | Chat Completions via Zhipu SDK | Native synchronous generation |
+| Kimi | OpenAI-compatible Chat Completions | No image generation client |
+| DeepSeek | OpenAI-compatible Chat Completions | No image generation client |
+| MiniMax | OpenAI-compatible Chat Completions | Native generation and character reference |
+| Volcengine | OpenAI-compatible Ark Chat Completions | Native Seedream generation and reference editing |
+
+Each listed conversation route has a deterministic test using its actual SDK
+with a simulated HTTP provider. This does not establish support for every model
+or for the other vendors' Anthropic-compatible endpoints. The
+[provider audit](../../docs/pleiad-multimodal-design.md#协议依据与厂商覆盖) links the official
+documentation checked on 2026-11-10 and records the remaining gaps.
+
+Qwen image requests use `AioMultiModalConversation` and native `image`/`text`
+blocks. For a vision model that also needs the multimodal endpoint on a text-only
+first turn, set `provider_options={"multimodal": True}`. This option belongs to
+the adapter and participates in its binding fingerprint; it is not sent to
+DashScope. Other text-only requests retain `AioGeneration`. Native Qwen input
+currently accepts text and `image_url.url` parts; extra fields such as `detail`
+and unsupported media parts fail explicitly. Qwen and GLM translate the Runner's
+token limit to `max_tokens` and report native usage without forwarding OpenAI's
+`stream_options` argument. GLM's SDK converts image data URLs to bare base64.
+
+Set a conversation client's `image_input="unsupported"` to reject image requests
+before submission. `supported` records a host-verified binding. The SDK does not
+infer vision support from vendor or model names. Deterministic transport tests
+verify request shapes. Real model availability and visual quality require host
+service tests. Conversation compatibility does not imply Images compatibility:
+Image operations use native adapters: OpenAI Images, Qwen DashScope multimodal
+generation, GLM Images, MiniMax `image_generation`, and Ark Seedream. These do not share wire
+formats. Anthropic, Kimi and DeepSeek have no integrated public image-generation
+API; selecting them for image operations fails explicitly.
+
+Import `ImageClient` from `pleiad.models.images.client`, requests and results
+from `pleiad.models.images.contracts`, and `ImageOperationError` from
+`pleiad.models.images.errors`. The client uses HTTPX from the selected provider extra and owns
+separate network resources from the conversation model. Paid submissions are
+attempted once; there is no automatic retry option. For example, with a
+host-persisted operation identity and the resolver defined above,
+
+```python
+from pleiad.messages.images import ImageReadScope
+from pleiad.models.images.client import ImageClient
+from pleiad.models.images.contracts import ImageEditRequest, ImageGenerationRequest
+
+images = ImageClient(
+    provider="openai",
+    model=os.environ["PLEIAD_EXAMPLE_IMAGE_MODEL"],
+    api_key=os.environ["PLEIAD_EXAMPLE_API_KEY"],
+)
+try:
+    generated = await images.generate(ImageGenerationRequest(
+        operation_id="host-operation-generate-1", prompt="A red ceramic mug on a white table",
+        count=1, size="1024x1024", quality="medium", output_format="png",
+    ))
+    edited = await images.edit(
+        ImageEditRequest(
+            operation_id="host-operation-edit-1", prompt="Make the pixel blue",
+            references=(IMAGE,), base_reference=IMAGE,
+        ),
+        resolver=resolve_image,
+        scope=ImageReadScope(session_id="image-example", run_id="edit-example"),
+    )
+finally:
+    await images.aclose()
+```
+
+`size` uses `WIDTHxHEIGHT` or `auto`; omitted output format and automatic
+quality/background use native defaults. Provider-specific controls go in
+`provider_options` and are validated before any image read or paid request.
+Unknown fields and unsupported combinations fail explicitly.
+
+| Provider | Generation | Reference operation | Options and limits |
+| --- | --- | --- | --- |
+| OpenAI | GPT Image | General edit, optional PNG mask | `output_compression`, `input_fidelity` (edit), `moderation` (generate), `user`; up to16 references |
+| Qwen | Synchronous Qwen Image | Ordered reference editing | `seed`, `watermark`, model-specific prompt controls; native dimensions/count validated |
+| GLM | GLM-Image, CogView | No documented sync reference edit | count1; native `quality`, `watermark_enabled`, `user_id` |
+| MiniMax | image-01 | One JPEG/PNG character reference | Explicit `reference_kind="character"`; `aspect_ratio`, `response_format`, `seed`, `prompt_optimizer`; count1..9 |
+| Volcengine | Seedream 5.0 Flash/Pro | General reference edit on the generation endpoint | count1; up to10 references; PNG/JPEG, `watermark`, `response_format`, `optimize_prompt_options` |
+
+MiniMax character reference is not general product editing. The first reference
+must equal `base_reference`. A mask must be PNG and match the base dimensions;
+the host validates its alpha and decodes input assets. Qwen, GLM and MiniMax
+reject masks. The current Volcengine adapter also rejects masks and advanced layer/
+transparency operations. A host cannot override a native unsupported capability to supported.
+Available native routes still default to `unverified` until tested against the
+exact endpoint, model and account. Legacy async Qwen text-to-image tasks and
+GLM's optional async task API are not exposed by this synchronous operation API.
+
+The live template selects Ark for both profiles: `doubao-seed-2-0-lite-260428`
+for image understanding and `doubao-seedream-5-0-flash-260915` for generation/editing.
+Install `pleiad[volcengine]` for this pair. The vision smoke test explicitly disables
+thinking through `extra_body` so it does not require encrypted thinking-history
+roundtrips. The image adapter sends JSON references to `images/generations`, not
+OpenAI multipart edits. Model availability and account access require live validation.
+
+`ImageResult` contains actual `ImageOutput.data` bytes, MIME, optional
+`revised_prompt`, request identity, bound and reported model names, nullable usage,
+and completion time. Empty image responses fail. Partial responses preserve
+their actual count. The host decodes and persists the result as its AssetVersion.
+
+Persist operation ID, request digest, binding and credential version before any
+paid submission. Local identical calls reuse their result, conflicting requests
+fail, and edit IDs also bind their Session/Run scope. Cross-process idempotency
+belongs to the host operation ledger. `acceptance_unknown` requires reconciliation
+of the original operation. Cancellation propagates and must leave the host's
+in-flight operation unknown. Synchronous query, cancellation and provider-side
+idempotency capabilities are explicitly unsupported.
+
+`download_failed` exposes an `ImageRecovery` on the error. Store that sensitive
+record in the external operation ledger and call `images.recover(record)` to
+download original outputs after a transient failure or restart. Recovery checks
+the binding and never submits another generation. Recovery records can contain
+temporary URLs and base64, so exclude them from Session, trace and Tool text.
+
+Both client families expose `binding_fingerprint`. It incorporates normalized
+endpoint, model and non-secret request settings. Credential rotation preserves
+the fingerprint. Agent checkpoint validation now includes the conversation
+binding. For an image Tool, include the image client's binding fingerprint in
+its opaque `ToolDescriptor.code` and matching `ToolRef`, so that image configuration
+changes are also detected by Agent recovery. The host owns credential-version
+binding. Historical text Sessions remain readable. Existing in-flight checkpoints
+from the preceding SDK contract must be settled using that version because their
+Agent fingerprints lack this binding data.
+
+The architecture and acceptance matrix are documented in
+[the multimodal design](../../docs/pleiad-multimodal-design.md).
 
 ## Agent declarations
 

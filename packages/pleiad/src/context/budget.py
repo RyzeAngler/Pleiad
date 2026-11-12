@@ -1,5 +1,6 @@
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -8,10 +9,36 @@ from pydantic import ConfigDict, Field, model_validator
 from pleiad.context.errors import ContextWindowError
 from pleiad.context.selection.models import ContextView
 from pleiad.contracts import ContractModel
-from pleiad.messages.message import Message
+from pleiad.errors.base import BusinessError
+from pleiad.messages.images import ImageBlock, ImageReference
+from pleiad.messages.message import Message, UserMessage
 from pleiad.models.contracts import Tool
 
 logger = logging.getLogger(__name__)
+
+ImageTokenEstimator = Callable[[ImageReference], int | None]
+
+
+class ImageTokenEstimateError(BusinessError):
+    """Report an image whose model-specific token cost is unknown."""
+
+    def __init__(self, unestimated_images: int) -> None:
+        """Record the unresolved count without exposing image identities."""
+        self.unestimated_images = unestimated_images
+        super().__init__(
+            "context.image_tokens.unknown",
+            "Image token estimates are unavailable. "
+            "Configure a model-specific estimator or explicitly allow unknown costs.",
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class TokenEstimate:
+    """Separate counted input tokens from unavailable image estimates."""
+
+    input_tokens: int
+    image_tokens: int | None
+    unestimated_images: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,15 +65,72 @@ class ApproximateTokenCounter:
 
     estimated = True
 
+    def __init__(
+        self,
+        image_token_estimator: ImageTokenEstimator | None = None,
+        *,
+        allow_unestimated_images: bool = False,
+    ) -> None:
+        """Bind a model-specific image estimator and explicit unknown-cost policy.
+
+        Args:
+            image_token_estimator: Host rule returning tokens or None for an unknown image cost.
+            allow_unestimated_images: Permit an incomplete token total when the host accepts that risk.
+        """
+        self.image_token_estimator = image_token_estimator
+        self.allow_unestimated_images = allow_unestimated_images
+
     def count(self, request: ContextCountInput) -> int:
-        """Estimate tokens from canonical JSON size."""
+        """Return estimated text and known image tokens for a complete request."""
+        return self.estimate(request).input_tokens
+
+    def estimate(self, request: ContextCountInput) -> TokenEstimate:
+        """Estimate text independently of image references and binary transport.
+
+        Args:
+            request: Complete provider-neutral input to count.
+
+        Returns:
+            Token facts, with image_tokens set to None if any image cost is unknown.
+
+        Raises:
+            ImageTokenEstimateError: If an image cost is unknown and policy forbids it.
+            ValueError: If the host estimator returns an invalid token count.
+        """
+        text_messages = []
+        image_tokens = 0
+        unestimated_images = 0
+        for message in request.messages:
+            text_message = message.model_dump(mode="json")
+            if isinstance(message, UserMessage) and not isinstance(message.content, str):
+                text_message["content"] = [
+                    block.model_dump(mode="json") for block in message.content if not isinstance(block, ImageBlock)
+                ]
+                for block in message.content:
+                    if not isinstance(block, ImageBlock):
+                        continue
+                    tokens = None if self.image_token_estimator is None else self.image_token_estimator(block.image)
+                    if tokens is None:
+                        unestimated_images += 1
+                    elif type(tokens) is not int or tokens < 0:
+                        raise ValueError("image token estimators must return a non-negative integer or None")
+                    else:
+                        image_tokens += tokens
+            text_messages.append(text_message)
+        if unestimated_images and not self.allow_unestimated_images:
+            raise ImageTokenEstimateError(unestimated_images)
         payload = {
             "instructions": request.instructions,
-            "messages": [message.model_dump(mode="json") for message in request.messages],
+            "messages": text_messages,
             "tools": [tool.model_dump(mode="json") for tool in request.tools],
         }
         serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        return max(1, (len(serialized) + 3) // 4)
+        text_tokens = max(1, (len(serialized) + 3) // 4)
+        return TokenEstimate(
+            input_tokens=text_tokens + image_tokens,
+            image_tokens=None if unestimated_images else image_tokens,
+            unestimated_images=unestimated_images,
+        )
 
 
 class ContextBudget(ContractModel):
@@ -85,6 +169,8 @@ class BudgetStatus:
     requires_compaction: bool
     exceeds_window: bool
     estimated: bool
+    image_tokens: int | None = None
+    unestimated_images: int = 0
 
 
 class BudgetGuard:
@@ -97,7 +183,15 @@ class BudgetGuard:
 
     def check(self, request: ContextCountInput) -> BudgetStatus:
         """Return token and compaction facts for a complete request."""
-        input_tokens = self.counter.count(request)
+        image_tokens = None
+        unestimated_images = 0
+        if isinstance(self.counter, ApproximateTokenCounter):
+            estimate = self.counter.estimate(request)
+            input_tokens = estimate.input_tokens
+            image_tokens = estimate.image_tokens
+            unestimated_images = estimate.unestimated_images
+        else:
+            input_tokens = self.counter.count(request)
         if input_tokens < 0:
             raise ValueError("token counters must return non-negative values")
         status = BudgetStatus(
@@ -106,6 +200,8 @@ class BudgetGuard:
             requires_compaction=input_tokens >= self.budget.compact_at,
             exceeds_window=input_tokens > self.budget.available_tokens,
             estimated=self.counter.estimated,
+            image_tokens=image_tokens,
+            unestimated_images=unestimated_images,
         )
         logger.debug(
             f"context budget input_tokens={status.input_tokens} available_tokens={status.available_tokens} "

@@ -1,10 +1,12 @@
+import base64
 import hashlib
 import json
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from uuid import NAMESPACE_URL, uuid5
 
 from pleiad.contracts import JsonObject, JsonSchema, JsonValue, thaw_json_object
+from pleiad.messages.images import ImageBlock, ImageReference, ResolvedImage
 from pleiad.messages.message import AssistantMessage, Message, SystemMessage, ToolCall, ToolMessage, UserMessage
 from pleiad.models.anthropic.client import AnthropicModelClient
 from pleiad.models.anthropic.request import AnthropicMessage, AnthropicRequest, AnthropicTool
@@ -41,6 +43,7 @@ class ModelInput:
     tools: tuple[Tool, ...]
     max_output_tokens: int
     output_schema: JsonSchema | None
+    resolved_images: tuple[ResolvedImage, ...] = field(default=(), repr=False)
 
     def digest(self) -> str:
         """Identify the exact resolved request without exposing its original content."""
@@ -114,6 +117,7 @@ def build_model_input(
     tools: tuple[Tool, ...],
     max_output_tokens: int,
     output_schema: JsonSchema | None,
+    resolved_images: tuple[ResolvedImage, ...] = (),
 ) -> ModelInput:
     """Create one immutable provider-neutral model input."""
     return ModelInput(
@@ -122,6 +126,7 @@ def build_model_input(
         tools=tools,
         max_output_tokens=max_output_tokens,
         output_schema=output_schema,
+        resolved_images=resolved_images,
     )
 
 
@@ -203,7 +208,9 @@ def openai_messages(model_input: ModelInput) -> list[OpenAIMessage]:
     messages: list[OpenAIMessage] = [OpenAIMessage(role="system", content=model_input.instructions)]
     for message in model_input.messages:
         if isinstance(message, UserMessage):
-            messages.append(OpenAIMessage(role="user", content=openai_message_content(message)))
+            messages.append(
+                OpenAIMessage(role="user", content=openai_message_content(message, model_input.resolved_images))
+            )
         elif isinstance(message, AssistantMessage):
             messages.append(
                 OpenAIMessage(
@@ -233,7 +240,9 @@ def anthropic_messages(model_input: ModelInput) -> list[AnthropicMessage]:
     while index < len(model_input.messages):
         message = model_input.messages[index]
         if isinstance(message, UserMessage):
-            messages.append(AnthropicMessage(role="user", content=anthropic_message_content(message)))
+            messages.append(
+                AnthropicMessage(role="user", content=anthropic_message_content(message, model_input.resolved_images))
+            )
             index += 1
         elif isinstance(message, AssistantMessage):
             blocks: list[JsonObject] = []
@@ -267,18 +276,48 @@ def anthropic_messages(model_input: ModelInput) -> list[AnthropicMessage]:
     return messages
 
 
-def openai_message_content(message: UserMessage) -> str | list[JsonValue]:
+def openai_message_content(message: UserMessage, images: tuple[ResolvedImage, ...] = ()) -> str | list[JsonValue]:
     """Project a Message's original content and blocks for OpenAI."""
     if isinstance(message.content, str):
         return message.content
-    return [block.model_dump(mode="json") for block in message.content]
+    blocks: list[JsonValue] = []
+    for block in message.content:
+        if isinstance(block, ImageBlock):
+            encoded = encoded_image(block.image, images)
+            blocks.append({"type": "image_url", "image_url": {"url": f"data:{block.image.mime};base64,{encoded}"}})
+        else:
+            blocks.append(block.model_dump(mode="json"))
+    return blocks
 
 
-def anthropic_message_content(message: UserMessage) -> str | list[JsonObject]:
+def anthropic_message_content(message: UserMessage, images: tuple[ResolvedImage, ...] = ()) -> str | list[JsonObject]:
     """Project a Message's original content and blocks for Anthropic."""
     if isinstance(message.content, str):
         return message.content
-    return [block.model_dump(mode="json") for block in message.content]
+    blocks: list[JsonObject] = []
+    for block in message.content:
+        if isinstance(block, ImageBlock):
+            blocks.append(
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": block.image.mime,
+                        "data": encoded_image(block.image, images),
+                    },
+                }
+            )
+        else:
+            blocks.append(block.model_dump(mode="json"))
+    return blocks
+
+
+def encoded_image(reference: ImageReference, images: tuple[ResolvedImage, ...]) -> str:
+    """Encode already authorized bytes only at the provider request boundary."""
+    for image in images:
+        if image.image == reference:
+            return base64.b64encode(image.data).decode("ascii")
+    raise ValueError("model request contains an unresolved image reference")
 
 
 def tool_call_arguments(message: ToolCall) -> JsonObject:

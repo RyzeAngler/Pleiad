@@ -1,0 +1,30 @@
+# Copy this file to .pleiad-workspace/multimodal.toml at the repository root.
+# Relative paths are resolved from the copied configuration file.
+output_dir = "provider-results"
+image_path = "/absolute/path/product.png"
+# Optional PNG alpha mask with the same dimensions as the base image:
+# mask_path = "/absolute/path/mask.png"
+
+[vision]
+provider = "volcengine"
+protocol = "openai"
+model = "doubao-seed-2-0-lite-260428"
+base_url = "https://ark.cn-beijing.volces.com/api/v3"
+api_key = "YOUR_VISION_API_KEY"
+prompt = "Read the large product code visible in this image. Return only the code."
+# Set this to text actually visible in your image. Do not put the answer in prompt.
+expected_text = "YOUR_VISIBLE_PRODUCT_CODE"
+max_output_tokens = 2048
+# This smoke test needs direct visual answers without encrypted thinking history.
+provider_options = { extra_body = { thinking = { type = "disabled" } } }
+
+[images]
+provider = "volcengine"
+model = "doubao-seedream-5-0-flash-260915"
+base_url = "https://ark.cn-beijing.volces.com/api/v3"
+size = "1536x1536"
+output_format = "png"
+provider_options = { response_format = "url", watermark = true }
+api_key = "YOUR_IMAGE_API_KEY"
+generation_prompt = "A red ceramic mug on a plain white table, product photography."
+edit_prompt = "Keep the product unchanged and replace only the background with pale blue."

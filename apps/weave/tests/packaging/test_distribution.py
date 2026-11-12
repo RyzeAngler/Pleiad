@@ -43,6 +43,25 @@ def test_distributions_install_without_the_checkout_and_ship_only_product_resour
         names = archive.namelist()
         assert "pleiad/runtime/execution/read_tool_result.py" in names
         assert "pleiad/messages/results.py" in names
+        assert "pleiad/messages/images.py" in names
+        assert "pleiad/models/binding.py" in names
+        assert "pleiad/models/images/client.py" in names
+        assert "pleiad/models/images/contracts.py" in names
+        assert "pleiad/models/images/errors.py" in names
+        for adapter in ("adapter", "openai", "qwen", "glm", "minimax", "volcengine"):
+            assert f"pleiad/models/images/{adapter}.py" in names
+        assert "pleiad/models/providers/volcengine.py" in names
+        sdk_metadata_path = next(name for name in names if name.endswith(".dist-info/METADATA"))
+        sdk_metadata = Parser().parsestr(archive.read(sdk_metadata_path).decode("utf-8"))
+        assert sdk_metadata["Version"] == "0.2.0"
+        assert "volcengine" in sdk_metadata.get_all("Provides-Extra", [])
+        volcengine_dependencies = {
+            requirement.name
+            for value in sdk_metadata.get_all("Requires-Dist", [])
+            if (requirement := Requirement(value)).marker is not None
+            and requirement.marker.evaluate({"extra": "volcengine"})
+        }
+        assert {"openai", "httpx"} <= volcengine_dependencies
         assert "pleiad/sessions/model_step.py" in names
         assert not any(name.startswith("pleiad/memory/") for name in names)
         assert "pleiad/runtime/runner.py" in names
@@ -63,8 +82,8 @@ def test_distributions_install_without_the_checkout_and_ship_only_product_resour
         ]
         assert sdk_requirements
         for requirement in sdk_requirements:
-            assert Version("0.1.2") in requirement.specifier
-            assert Version("0.1.1") not in requirement.specifier
+            assert Version("0.2.0") in requirement.specifier
+            assert Version("0.1.2") not in requirement.specifier
         assert "pleiad_weave/agent/graph.py" in names
         assert "pleiad_weave/capabilities/approval.py" in names
         assert "pleiad_weave/memory_cli.py" in names
@@ -110,6 +129,8 @@ import asyncio
 import re
 from importlib.resources import files
 from pleiad.agent.agent import Agent
+from pleiad.messages.images import ImageBlock, ImageReference
+from pleiad.models.binding import binding_fingerprint
 from pleiad.models.openai.client import OpenAIModelClient
 from pleiad.models.openai.response import OpenAIStreamChoice, OpenAIStreamChunk, OpenAIStreamDelta
 from pleiad.runtime.runner import Runner
@@ -123,6 +144,7 @@ from pleiad.sessions.records import RunStatus
 from pleiad.skills.loader import SkillLoader
 from pleiad.tools.registry import ToolRegistry
 from pleiad.schemas import validate_json_schema
+from pleiad.version import __version__
 from pleiad.tools.runtime import ToolRuntime
 from pleiad_weave.evaluation import EvaluationCase, score_output
 from pleiad_weave.agent.graph_controls import GraphControls
@@ -130,6 +152,12 @@ from pleiad_weave.application.service import ExecutionService
 from pleiad_weave.infrastructure.bootstrap import create_application
 from pleiad_weave.infrastructure.sandbox.images import bundled_python_image_definition
 validate_json_schema({"type": "object"})
+assert __version__ == "0.2.0"
+image = ImageBlock(image=ImageReference(
+    reference="asset:installed", sha256="a" * 64, mime="image/png", width=1, height=1,
+))
+assert ImageBlock.model_validate_json(image.model_dump_json()) == image
+assert importlib.util.find_spec("pleiad.models.images.client") is not None
 assert "site-packages" in str(files("pleiad_weave"))
 assert importlib.util.find_spec("pleiad_weave.application.supervisor") is None
 assert importlib.util.find_spec("pleiad_weave.infrastructure.storage.traces") is None
@@ -176,7 +204,11 @@ assert score_output(case, '{"n":1}')
 class InstalledModel(OpenAIModelClient):
     def __init__(self):
         self.provider = "installed-fake"
+        self.image_input = "unverified"
         self.model = "installed"
+        self.binding_fingerprint = binding_fingerprint(
+            protocol="openai", provider=self.provider, model=self.model, base_url=None, provider_options={}
+        )
     async def stream(self, request):
         yield OpenAIStreamChunk(
             model=self.model,

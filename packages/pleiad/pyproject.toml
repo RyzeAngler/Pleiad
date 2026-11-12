@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pleiad"
-version = "0.1.2"
+version = "0.2.0"
 description = "A provider-neutral runtime for building and executing Agents."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -56,6 +56,10 @@ minimax = [
     "httpx[socks]>=0.28.1,<1.0.0",
     "openai>=2.0.0,<3.0.0",
 ]
+volcengine = [
+    "httpx[socks]>=0.28.1,<1.0.0",
+    "openai>=2.0.0,<3.0.0",
+]
 models = [
     "aiohttp>=3.9.0,<4.0.0",
     "anthropic>=0.67.0,<1.0.0",
@@ -83,6 +87,7 @@ dev = [
     "mypy>=1.17.0,<2.0.0",
     "openai>=2.0.0,<3.0.0",
     "opentelemetry-sdk>=1.44.0,<2.0.0",
+    "pillow>=12.3.0,<13.0.0",
     "pytest>=8.4.0,<9.0.0",
     "ruff==0.15.22",
     "types-jsonschema>=4.25.0,<5.0.0",

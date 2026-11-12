@@ -6,6 +6,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from pleiad.contracts import ContractModel, JsonObject, JsonValue
 from pleiad.mcp.tool import McpTool
 from pleiad.models.anthropic.client import AnthropicModelClient
+from pleiad.models.binding import credential_field, credential_values
 from pleiad.models.openai.client import OpenAIModelClient
 from pleiad.sandbox.policy import SandboxPolicy
 from pleiad.sandbox.sandbox import Sandbox
@@ -55,14 +56,6 @@ class ResourceDetail(ResourceSummary):
     files: tuple[str, ...] = ()
 
 
-def sensitive_name(name: str) -> bool:
-    """Recognize credential fields without matching token limits or schema keywords."""
-    normalized = re.sub(r"[^a-z0-9]", "", name.casefold())
-    return normalized in {"key", "ak", "auth", "cookie", "setcookie"} or normalized.endswith(
-        ("key", "keyid", "token", "password", "passwd", "secret", "authorization", "credential", "credentials")
-    )
-
-
 def redact_url(value: str) -> str:
     """Retain URL routing information while masking credentials and signed query values."""
     parsed = urlsplit(value)
@@ -71,7 +64,7 @@ def redact_url(value: str) -> str:
         authority = f"{MASK}@{authority.rsplit('@', 1)[1]}"
     query = urlencode(
         [
-            (key, MASK if sensitive_name(key) or key.casefold() in {"sig", "signature", "x-amz-signature"} else item)
+            (key, MASK if credential_field(key) or key.casefold() in {"sig", "signature", "x-amz-signature"} else item)
             for key, item in parse_qsl(parsed.query, keep_blank_values=True)
         ],
         safe="[]",
@@ -90,24 +83,11 @@ def redact_text(value: str, *, secrets: tuple[str, ...] = ()) -> str:
     return BEARER_PATTERN.sub(lambda match: f"{match.group(1)} {MASK}", value)
 
 
-def secret_values(value: JsonValue, *, sensitive: bool = False) -> tuple[str, ...]:
-    """Find explicitly configured credentials so duplicate occurrences are also masked."""
-    if isinstance(value, dict):
-        return tuple(
-            secret
-            for key, item in value.items()
-            for secret in secret_values(item, sensitive=sensitive or sensitive_name(key))
-        )
-    if isinstance(value, list):
-        return tuple(secret for item in value for secret in secret_values(item, sensitive=sensitive))
-    return (value,) if sensitive and isinstance(value, str) and value and value != MASK else ()
-
-
 def redact_value(value: JsonValue, *, secrets: tuple[str, ...] = ()) -> JsonValue:
     """Recursively mask actual configuration values while retaining their field names."""
     if isinstance(value, dict):
         return {
-            key: MASK if sensitive_name(key) and item is not None else redact_value(item, secrets=secrets)
+            key: MASK if credential_field(key) and item is not None else redact_value(item, secrets=secrets)
             for key, item in value.items()
         }
     if isinstance(value, list):
@@ -125,7 +105,7 @@ def redact_schema(schema: JsonObject, *, sensitive_property: bool = False, secre
             result[key] = MASK if sensitive_property and value is not None else redact_value(value, secrets=secrets)
         elif key in {"properties", "$defs", "definitions", "patternProperties"} and isinstance(value, dict):
             result[key] = {
-                name: redact_schema(item, sensitive_property=sensitive_name(name), secrets=secrets)
+                name: redact_schema(item, sensitive_property=credential_field(name), secrets=secrets)
                 if isinstance(item, dict)
                 else item
                 for name, item in value.items()
@@ -150,7 +130,7 @@ def safe_detail(detail: ResourceDetail, *, secrets: tuple[str, ...] = ()) -> Res
     """Sanitize all browser-visible values before returning the detail contract."""
     values = detail.model_dump(mode="json")
     schemas = {key: values.pop(key) for key in ("input_schema", "output_schema")}
-    credentials = (*secrets, *secret_values(values))
+    credentials = (*secrets, *credential_values(values))
     redacted = redact_value(values, secrets=credentials)
     if not isinstance(redacted, dict):
         raise TypeError("Resource details must serialize to an object")
@@ -170,7 +150,7 @@ def model_credentials(model: OpenAIModelClient | AnthropicModelClient) -> tuple[
     key = model.api_key.get_secret_value()
     return (
         *((key,) if key else ()),
-        *secret_values({"headers": dict(model.headers), "provider_options": model.provider_options}),
+        *credential_values({"headers": dict(model.headers), "provider_options": model.provider_options}),
     )
 
 

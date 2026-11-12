@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from pleiad.contracts import ContractModel, JsonObject
+from pleiad.models.binding import binding_fingerprint
 from pleiad.models.openai.client import OpenAIModelClient
 from pleiad.models.openai.request import OpenAIRequest
 from pleiad.models.openai.response import (
@@ -52,7 +53,11 @@ class EmptyArguments(ContractModel):
 class NodeModel(OpenAIModelClient):
     def __init__(self) -> None:
         self.provider = "fake"
+        self.image_input = "unverified"
         self.model = "test-model"
+        self.binding_fingerprint = binding_fingerprint(
+            protocol="openai", provider=self.provider, model=self.model, base_url=None, provider_options={}
+        )
         self.requests: list[str] = []
 
     async def stream(self, request: OpenAIRequest | Mapping[str, object]) -> AsyncIterator[OpenAIStreamChunk]:

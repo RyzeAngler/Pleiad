@@ -13,7 +13,7 @@ from jsonschema import Draft202012Validator
 from pleiad.agent.agent import Agent
 from pleiad.agent.errors import AgentConfigurationError
 from pleiad.budgets import BudgetLedger
-from pleiad.context.budget import BudgetGuard
+from pleiad.context.budget import BudgetGuard, TokenCounter
 from pleiad.context.compaction.compactor import ContextCompactor, HistorySummarizer
 from pleiad.context.selection.models import ContextBlock
 from pleiad.contracts import CapabilityGrants, JsonObject, JsonValue, thaw_json_object
@@ -32,6 +32,7 @@ from pleiad.events.runtime import (
     ToolCompletedEvent,
 )
 from pleiad.logging.context import bind_log_context
+from pleiad.messages.images import ImageLimits, ImageResolver
 from pleiad.messages.message import AssistantMessage
 from pleiad.messages.message import ToolCall as MessageToolCall
 from pleiad.observability.attributes import AGENT_NAME, PARENT_RUN_ID, RUN_ID, RUN_NAME
@@ -91,6 +92,9 @@ class Runner:
         loop: AgentLoop | None = None,
         history_summarizer: HistorySummarizer | None = None,
         observability: Observability | None = None,
+        image_resolver: ImageResolver | None = None,
+        image_limits: ImageLimits | None = None,
+        token_counter: TokenCounter | None = None,
     ) -> None:
         """Bind reusable runtime mechanisms and host-imposed upper limits."""
         self.tools = tools
@@ -101,6 +105,9 @@ class Runner:
         self.observability = Observability() if observability is None else observability
         self.loop = AgentLoop(tool_runtime, observability=self.observability) if loop is None else loop
         self.history_summarizer = history_summarizer
+        self.image_resolver = image_resolver
+        self.image_limits = ImageLimits() if image_limits is None else image_limits
+        self.token_counter = token_counter
         self.handles: dict[tuple[int, str, str], RunHandle] = {}
         self.lock = asyncio.Lock()
 
@@ -501,7 +508,7 @@ class Runner:
                                 skills=binding.skills,
                                 policy=policy,
                                 compactor=ContextCompactor(
-                                    BudgetGuard(limits.context_budget), self.loop.context_renderer
+                                    BudgetGuard(limits.context_budget, self.token_counter), self.loop.context_renderer
                                 ),
                                 context_blocks=context,
                                 agent_fingerprint=binding.fingerprint,
@@ -514,6 +521,8 @@ class Runner:
                                 handoff_count=0 if checkpoint is None else checkpoint.handoff_count,
                                 parent_run_id=parent_run_id,
                                 max_handoffs=limits.max_handoffs,
+                                image_resolver=self.image_resolver,
+                                image_limits=self.image_limits,
                             )
                         if outcome.status is LoopStatus.PAUSED:
                             await operations.settle()
@@ -954,6 +963,7 @@ def agent_fingerprint(agent: Agent, tools: tuple[BaseTool, ...], skills: tuple[S
             "model_type": type(model).__name__,
             "provider": model.provider,
             "model": model.model,
+            "model_binding": model.binding_fingerprint,
             "tools": [ref.code for ref in agent.tools],
             "skills": [ref.code for ref in agent.skills],
             "output_schema": thaw_json_object(agent.output_schema) if agent.output_schema is not None else None,

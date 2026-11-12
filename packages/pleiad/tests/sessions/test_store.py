@@ -13,7 +13,8 @@ import pytest
 from pleiad.context.budget import ContextBudget
 from pleiad.contracts import CapabilityGrants
 from pleiad.events.contracts import Event
-from pleiad.messages.message import AssistantMessage, ToolCall, ToolMessage
+from pleiad.messages.images import ImageBlock, ImageReference
+from pleiad.messages.message import AssistantMessage, TextBlock, ToolCall, ToolMessage, UserMessage
 from pleiad.messages.results import OperationResultReference
 from pleiad.models.result import ModelUsage
 from pleiad.sessions.backends.in_memory import InMemorySessionStore
@@ -100,6 +101,71 @@ def test_input_retries_preserve_original_receipt_and_reject_changed_payload(stor
             await session.enqueue(envelope("same", "changed"))
         records = await session.pending_inputs()
         assert len(records) == 1 and records[0].envelope.content == "question"
+
+    asyncio.run(scenario())
+
+
+def test_image_input_persistence(store: SessionStore) -> None:
+    image = ImageBlock(
+        image=ImageReference(reference="asset:version-1", sha256="a" * 64, mime="image/png", width=2, height=3)
+    )
+    content = (TextBlock(text="before"), image, TextBlock(text="after"))
+    original = InputEnvelope(
+        input_id="observed-image",
+        kind="observation",
+        source="canvas.image-operation",
+        causation_id="operation-1",
+        content=content,
+    )
+
+    async def scenario() -> None:
+        session = Session("image-session", store)
+        receipt = await session.enqueue(original)
+        restored = Session("image-session", store)
+        pending = await restored.pending_inputs()
+        assert len(pending) == 1
+        assert pending[0].envelope == original
+        assert pending[0].sequence == receipt.sequence
+        projected = pending[0].envelope.message()
+        assert projected.message_id == "observed-image"
+        assert not isinstance(projected.content, str)
+        assert projected.content[1:] == content
+        assert isinstance(projected.content[0], TextBlock)
+        assert json.loads(projected.content[0].text) == {
+            "input_id": "observed-image",
+            "kind": "observation",
+            "source": "canvas.image-operation",
+            "causation_id": "operation-1",
+        }
+        assert UserMessage.model_validate_json(projected.model_dump_json()) == projected
+
+    asyncio.run(scenario())
+
+
+def test_image_input_retry_conflict(store: SessionStore) -> None:
+    image = ImageBlock(
+        image=ImageReference(reference="asset:version-1", sha256="a" * 64, mime="image/png", width=2, height=3)
+    )
+    original = InputEnvelope(input_id="image-1", kind="user", source="canvas", content=(TextBlock(text="look"), image))
+
+    async def scenario() -> None:
+        session = Session("image-session", store)
+        first = await session.enqueue(original)
+        retry = await session.enqueue(InputEnvelope.model_validate_json(original.model_dump_json()))
+        assert retry.duplicate
+        assert retry.accepted_at == first.accepted_at
+        changed_images = (
+            image.model_copy(update={"image": image.image.model_copy(update={"sha256": "b" * 64})}),
+            image.model_copy(update={"image": image.image.model_copy(update={"width": 4})}),
+        )
+        changed_contents = (
+            (image, TextBlock(text="look")),
+            *((TextBlock(text="look"), changed) for changed in changed_images),
+        )
+        for changed in changed_contents:
+            with pytest.raises(SessionConflictError, match="different content"):
+                await session.enqueue(original.model_copy(update={"content": changed}))
+        assert len(await session.pending_inputs()) == 1
 
     asyncio.run(scenario())
 

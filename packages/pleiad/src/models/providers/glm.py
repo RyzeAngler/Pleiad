@@ -26,6 +26,7 @@ from pleiad.models.errors import (
     ModelRequestError,
     ModelResponseError,
     ModelTimeoutError,
+    ModelUnsupportedError,
     classify_provider_error,
 )
 from pleiad.models.openai.request import OpenAIRequest
@@ -33,6 +34,7 @@ from pleiad.models.openai.response import (
     OpenAIResponse,
     OpenAIStreamChunk,
     parse_stream_chunk,
+    read_field,
 )
 from pleiad.models.openai.response import (
     parse_response as parse_openai_response,
@@ -105,7 +107,7 @@ class OpenAIProvider:
         try:
             create: Callable[..., object] = self.client.chat.completions.create
             raw = await offload(lambda: create(**payload))
-            return parse_openai_response(raw)
+            return parse_openai_response(response_payload(raw, streaming=False))
         except TimeoutException as error:
             raise ModelTimeoutError() from error
         except TransportError as error:
@@ -136,7 +138,7 @@ class OpenAIProvider:
                 item = await offload(lambda: next(iterator, None))
                 if item is None:
                     break
-                chunk = parse_stream_chunk(item)
+                chunk = parse_stream_chunk(response_payload(item, streaming=True))
                 for choice in chunk.choices:
                     if choice.finish_reason is not None:
                         finished = True
@@ -275,8 +277,32 @@ def openai_payload(
 ) -> JsonObject:
     """Build a GLM OpenAI request payload and classify conversion failures."""
     try:
-        return request.payload(model=model, provider_options=provider_options)
+        payload = request.payload(model=model, provider_options=provider_options)
     except ValueError as error:
         raise ModelRequestError(
             "The model request cannot be converted for the provider.",
         ) from error
+    if request.max_tokens is not None and request.max_completion_tokens is not None:
+        raise ModelRequestError("The request cannot set both max_tokens and max_completion_tokens.")
+    if request.max_completion_tokens is not None:
+        payload["max_tokens"] = payload.pop("max_completion_tokens")
+    # GLM reports usage natively; the Zhipu SDK has no OpenAI stream_options argument.
+    options = payload.pop("stream_options", None)
+    if options is not None and (
+        not isinstance(options, dict)
+        or set(options) != {"include_usage"}
+        or not isinstance(options["include_usage"], bool)
+    ):
+        raise ModelUnsupportedError("GLM supports only include_usage in stream_options.")
+    return payload
+
+
+def response_payload(raw: object, *, streaming: bool) -> Mapping[str, object]:
+    """Add the OpenAI protocol discriminator absent from native Zhipu responses."""
+    return {
+        "object": "chat.completion.chunk" if streaming else "chat.completion",
+        "id": read_field(raw, "id"),
+        "model": read_field(raw, "model"),
+        "choices": read_field(raw, "choices"),
+        "usage": read_field(raw, "usage"),
+    }

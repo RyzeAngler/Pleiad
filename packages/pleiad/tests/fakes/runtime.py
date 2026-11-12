@@ -3,7 +3,9 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from pathlib import Path
 
 from pleiad.agent.agent import Agent
+from pleiad.context.budget import TokenCounter
 from pleiad.contracts import ContractModel, JsonObject, ToolRef
+from pleiad.messages.images import ImageLimits, ImageResolver
 from pleiad.models.anthropic.client import AnthropicModelClient
 from pleiad.models.anthropic.request import AnthropicRequest
 from pleiad.models.anthropic.response import (
@@ -13,6 +15,7 @@ from pleiad.models.anthropic.response import (
     AnthropicStreamUsage,
     AnthropicUsage,
 )
+from pleiad.models.binding import binding_fingerprint
 from pleiad.models.openai.client import OpenAIModelClient
 from pleiad.models.openai.request import OpenAIRequest
 from pleiad.models.openai.response import (
@@ -48,7 +51,11 @@ class FakeOpenAIModel(OpenAIModelClient):
 
     def __init__(self, batches: tuple[tuple[OpenAIStreamChunk, ...], ...], *, report_usage: bool = True) -> None:
         self.provider = "fake"
+        self.image_input = "unverified"
         self.model = "fake-model"
+        self.binding_fingerprint = binding_fingerprint(
+            protocol="openai", provider=self.provider, model=self.model, base_url=None, provider_options={}
+        )
         self.batches = iter(batches)
         self.report_usage = report_usage
         self.requests: list[OpenAIRequest] = []
@@ -75,7 +82,11 @@ class FakeAnthropicModel(AnthropicModelClient):
 
     def __init__(self, batches: tuple[tuple[AnthropicStreamEvent, ...], ...]) -> None:
         self.provider = "fake"
+        self.image_input = "unverified"
         self.model = "fake-model"
+        self.binding_fingerprint = binding_fingerprint(
+            protocol="anthropic", provider=self.provider, model=self.model, base_url=None, provider_options={}
+        )
         self.batches = iter(batches)
         self.requests: list[AnthropicRequest] = []
 
@@ -253,6 +264,10 @@ def make_runner(
     model: FakeOpenAIModel | FakeAnthropicModel,
     tmp_path: Path,
     function: Callable[[ToolContext, JsonObject], Awaitable[ToolOutput]] | None = None,
+    *,
+    image_resolver: ImageResolver | None = None,
+    image_limits: ImageLimits | None = None,
+    token_counter: TokenCounter | None = None,
 ) -> tuple[Runner, Agent]:
     """Bind a fake model, real default Tools, and an optional FunctionTool."""
     registry = ToolRegistry()
@@ -281,7 +296,14 @@ def make_runner(
         )
         tools = (*tools, ToolRef("echo"))
     agent = Agent(name="assistant", model=model, prompt="Answer the user.", tools=tools)
-    return Runner(tools=registry, skills=SkillLoader(), tool_runtime=ToolRuntime()), agent
+    return Runner(
+        tools=registry,
+        skills=SkillLoader(),
+        tool_runtime=ToolRuntime(),
+        image_resolver=image_resolver,
+        image_limits=image_limits,
+        token_counter=token_counter,
+    ), agent
 
 
 async def successful_tool(context: ToolContext, arguments: JsonObject) -> JsonObject:
