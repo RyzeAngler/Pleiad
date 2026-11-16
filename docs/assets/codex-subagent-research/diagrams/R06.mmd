@@ -1,0 +1,12 @@
+stateDiagram-v2
+    [*] --> Registered
+    state Registered {
+      [*] --> ResidentIdle
+      ResidentIdle --> ResidentRunning: 任务准入
+      ResidentRunning --> ResidentIdle: 完成 / 中断 / 错误
+      ResidentIdle --> Unloaded: 容量淘汰与资源清理
+      Unloaded --> ResidentIdle: 合法历史与绑定可恢复
+      Unloaded --> Unavailable: 所需持久历史不存在
+    }
+    Registered --> Closed: 显式树或线程关闭
+    Closed --> [*]

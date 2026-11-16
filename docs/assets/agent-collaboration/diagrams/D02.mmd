@@ -1,0 +1,13 @@
+flowchart TB
+    UI["客户端<br/>Web / CLI / TUI"] -->|宿主协议| App
+    subgraph HostSystem["宿主应用系统"]
+      App["Owner 进程 / Python 3.12<br/>产品应用 + Pleiad SDK"]
+      Product[("产品数据库<br/>Execution / 授权 / 资产关联")]
+      Collab[("协作数据库<br/>scope / member / work / inbox")]
+      Sessions[("Session 数据库<br/>Run / ModelStep / 输入 / 用量")]
+      App -->|产品事务| Product
+      App -->|协作事务| Collab
+      App -->|SessionStore 公共 API| Sessions
+    end
+    App -->|异步模型传输| Model["外部模型"]
+    App -->|宿主授权的实现| Tool["工具 / MCP / OCI"]

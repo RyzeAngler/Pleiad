@@ -1,0 +1,11 @@
+stateDiagram-v2
+    [*] --> Open
+    Open --> Closing: close 或系统故障
+    Closing --> Closed: 拥有资源已结算
+    Closing --> Closing: 仍在清理 / 外部效果待核实
+    Closed --> [*]
+    note right of Open
+      适用于 scope/member 开放状态
+      单轮工作终态不关闭成员
+      closed 不意味着删除历史
+    end note

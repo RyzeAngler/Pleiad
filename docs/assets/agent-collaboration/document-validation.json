@@ -1,0 +1,22 @@
+{
+  "date": "2026-11-12",
+  "document": "pleiad-agent-collaboration-architecture.md",
+  "sourceSha256": "08088bf442bfc6f7ee355943d6c315359c6e99e7999cc0afe3f7f2fae3a39bd6",
+  "mermaidBlocks": 16,
+  "sourceMatches": 16,
+  "markdownLocalLinks": 26,
+  "htmlLocalLinks": 71,
+  "desktop": {
+    "width": 1440,
+    "svg": 16,
+    "horizontalOverflow": false,
+    "brokenAnchors": 0,
+    "pageErrors": 0
+  },
+  "tablet": {
+    "width": 820,
+    "pageOverflow": false,
+    "svg": 16
+  },
+  "scope": "Document and diagram checks only; runtime validation is recorded separately in the SDK handoff."
+}

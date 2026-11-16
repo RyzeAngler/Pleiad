@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 
 from pleiad.budgets import BudgetLedger
 from pleiad.contracts import UsageCharge
+from pleiad.limits import remaining
 from pleiad.runtime.policy import EffectivePolicy
 from pleiad.sessions.usage import RunUsage
 from pleiad.tools.base import ToolScope
@@ -46,16 +47,33 @@ class RunControl:
         for binding in self.scopes:
             await binding[1].wait(run_id)
 
-    def admission(self, run_id: str, usage: RunUsage, policy: EffectivePolicy) -> tuple[RunUsage, int, int]:
+    async def before_finish(self, run_id: str) -> bool:
+        """Seal input admission or continue for explicit pending owner input."""
+        pending = False
+        for binding in self.scopes:
+            scope = binding[1]
+            if scope.before_finish is not None:
+                pending = await scope.before_finish(run_id) or pending
+        return pending
+
+    @property
+    def has_input_gate(self) -> bool:
+        """Return whether a bound scope owns final external-input admission."""
+        return any(binding[1].before_finish is not None for binding in self.scopes)
+
+    def admission(
+        self, run_id: str, usage: RunUsage, policy: EffectivePolicy
+    ) -> tuple[RunUsage, int | None, int | None]:
         """Intersect parent model admission with actual held child reservations."""
         current = self.collect(run_id, usage)
-        steps = max(0, policy.max_model_steps - current.total_model_calls)
-        tokens = max(0, policy.max_output_tokens - current.budget_output_tokens)
+        steps = remaining(policy.max_model_steps, current.total_model_calls)
+        tokens = remaining(policy.max_output_tokens, current.budget_output_tokens)
         if self.budget_ledger is not None:
             pool = self.budget_ledger.observe_parent(
                 run_id,
                 ParentRunLimits(
                     deadline=policy.deadline,
+                    max_response_output_tokens=policy.max_response_output_tokens,
                     remaining_model_steps=steps,
                     remaining_output_tokens=tokens,
                     child_model_calls=current.child_model_calls,
@@ -63,7 +81,7 @@ class RunControl:
                     tool_concurrency=policy.tool_concurrency,
                 ),
             )
-            steps, tokens = max(0, pool.remaining_model_steps), max(0, pool.remaining_output_tokens)
+            steps, tokens = remaining(pool.remaining_model_steps, 0), remaining(pool.remaining_output_tokens, 0)
         return current, steps, tokens
 
     async def close_scopes(self, run_id: str, *, cancelled: bool, suspended: bool) -> None:

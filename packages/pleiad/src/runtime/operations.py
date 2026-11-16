@@ -3,6 +3,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, uuid5
 
+from pleiad.limits import seconds_remaining
 from pleiad.messages.results import OperationResultReference
 from pleiad.sessions.input import InputEnvelope
 from pleiad.sessions.records import OperationRecord
@@ -69,11 +70,7 @@ class OperationScope:
         )
         self.tasks[operation_id] = task
         try:
-            remaining = (
-                None
-                if context.parent_limits is None
-                else max(0.0, (context.parent_limits.deadline - datetime.now(UTC)).total_seconds())
-            )
+            remaining = None if context.parent_limits is None else seconds_remaining(context.parent_limits.deadline)
             async with asyncio.timeout(remaining):
                 await accepted.wait()
         except TimeoutError:
@@ -237,17 +234,26 @@ class OperationScope:
         finally:
             await self.writer.waiting_event(False)
 
-    async def ready_inputs(self) -> bool:
+    async def ready_inputs(self, *, include_external: bool = True) -> bool:
         """Check eligible inbox facts without admitting another model step."""
         journal = await self.writer.store.snapshot(self.writer.session_id)
         pending = tuple(
-            value for value in journal.inputs if value.step_id is None and value.run_id in {None, self.writer.run_id}
+            value
+            for value in journal.inputs
+            if value.step_id is None
+            and value.run_id in {None, self.writer.run_id}
+            and value.target_run_id in {None, self.writer.run_id}
+            and value.invocation_id in {None, self.writer.snapshot.invocation_id}
         )
         operations = await self.writer.store.operations(self.writer.session_id, self.writer.run_id)
         owned = {operation.operation_id for operation in operations}
         return any(
             (value.envelope.kind == "operation_result" and value.envelope.causation_id in owned)
-            or (value.envelope.kind != "operation_result" and self.writer.snapshot.input_mode == "live")
+            or (
+                include_external
+                and value.envelope.kind != "operation_result"
+                and self.writer.snapshot.input_mode == "live"
+            )
             for value in pending
         )
 

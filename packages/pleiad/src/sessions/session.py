@@ -15,9 +15,11 @@ class Session:
         self.session_id = session_id
         self.store = store
 
-    async def enqueue(self, value: InputEnvelope) -> InputReceipt:
+    async def enqueue(
+        self, value: InputEnvelope, *, run_id: str | None = None, invocation_id: str | None = None
+    ) -> InputReceipt:
         """Persist an input and return its original idempotent acceptance receipt."""
-        return await self.store.enqueue(self.session_id, value)
+        return await self.store.enqueue(self.session_id, value, run_id=run_id, invocation_id=invocation_id)
 
     async def read(self, *, after_sequence: int = 0, limit: int = 50) -> SessionPage:
         """Read bounded original messages without granting Run writer ownership."""

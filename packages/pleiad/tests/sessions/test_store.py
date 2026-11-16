@@ -51,6 +51,36 @@ def envelope(identity: str, content: str = "question") -> InputEnvelope:
     return InputEnvelope(input_id=identity, kind="user", source="test.user", content=content)
 
 
+def test_live_run_does_not_claim_another_invocations_reserved_input(store: SessionStore) -> None:
+    async def scenario() -> None:
+        writer = await start_writer(store, mode="live")
+        await writer.session.enqueue(envelope("future", "next work"), invocation_id="future-run")
+        step = await writer.begin("agent")
+        assert step.input_ids == ("first",)
+        pending = await writer.session.pending_inputs()
+        assert tuple(value.envelope.input_id for value in pending) == ("future",)
+        assert pending[0].invocation_id == "future-run"
+
+    asyncio.run(scenario())
+
+
+def test_targeted_input_acceptance_does_not_invalidate_the_active_writer(store: SessionStore) -> None:
+    async def scenario() -> None:
+        writer = await start_writer(store, mode="live")
+        first = await writer.begin("agent")
+        await writer.session.enqueue(envelope("targeted", "explicit followup"), run_id=writer.run_id)
+        before = await store.snapshot("chat")
+        record = next(value for value in before.inputs if value.envelope.input_id == "targeted")
+        assert record.run_id is None and record.target_run_id == writer.run_id
+        await writer.complete(first.step_id, (AssistantMessage(content="first answer"),))
+        second = await writer.begin("agent")
+        assert second.input_ids == ("targeted",)
+        with pytest.raises(SessionConflictError, match="active Run"):
+            await writer.session.enqueue(envelope("wrong-target"), run_id="missing")
+
+    asyncio.run(scenario())
+
+
 async def start_writer(store: SessionStore, *, mode: Literal["batch", "live"] = "batch") -> SessionWriter:
     session = Session("chat", store)
     await session.enqueue(envelope("first"))
@@ -1043,6 +1073,27 @@ def test_sqlite_refuses_an_operation_that_lost_its_persisted_run_or_call_ownersh
         journal = await store.snapshot("chat")
         corrupted = journal.model_copy(
             update={"operations": (journal.operations[0].model_copy(update={identity: "unrelated"}),)}
+        )
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                "UPDATE session_journals SET payload=? WHERE session_id='chat'", (corrupted.model_dump_json(),)
+            )
+        with pytest.raises(SessionDataCorruptedError, match="persisted Session journal is invalid"):
+            await SqliteSessionStore(database).snapshot("chat")
+
+    asyncio.run(scenario())
+
+
+def test_sqlite_reports_corruption_when_a_reserved_input_loses_its_owning_run(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        database = tmp_path / "corrupted-input.sqlite3"
+        store = SqliteSessionStore(database)
+        await start_writer(store)
+        journal = await store.snapshot("chat")
+        corrupted = journal.model_copy(
+            update={
+                "inputs": (journal.inputs[0].model_copy(update={"run_id": "missing", "invocation_id": "first-run"}),),
+            }
         )
         with sqlite3.connect(database) as connection:
             connection.execute(

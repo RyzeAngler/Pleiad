@@ -1,9 +1,9 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 
 from pleiad.agent.agent import Agent
 from pleiad.context.selection.models import ContextBlock
+from pleiad.limits import expired
 from pleiad.orchestration.budget import child_policy
 from pleiad.orchestration.errors import SubagentPolicyError
 from pleiad.runtime.execution.control import RuntimeHandoffBinding
@@ -55,6 +55,6 @@ class Subagent:
             return effective_policy(
                 self.child_limits(context), self.runner.host_policy, agent_hints=self.agent.policy_hints
             )
-        if parent.deadline <= datetime.now(UTC):
+        if expired(parent.deadline):
             raise SubagentPolicyError("The parent Run deadline expired before Subagent execution.")
         return parent

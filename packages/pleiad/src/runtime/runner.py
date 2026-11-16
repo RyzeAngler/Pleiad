@@ -31,6 +31,7 @@ from pleiad.events.runtime import (
     RunStartedEvent,
     ToolCompletedEvent,
 )
+from pleiad.limits import expired, remaining, tighter
 from pleiad.logging.context import bind_log_context
 from pleiad.messages.images import ImageLimits, ImageResolver
 from pleiad.messages.message import AssistantMessage
@@ -157,9 +158,10 @@ class Runner:
             if parent_policy is None
             else {
                 "timeout_seconds": parent_policy.timeout_seconds,
-                "deadline": parent_policy.deadline.isoformat(),
+                "deadline": None if parent_policy.deadline is None else parent_policy.deadline.isoformat(),
                 "max_model_steps": parent_policy.max_model_steps,
                 "max_output_tokens": parent_policy.max_output_tokens,
+                "max_response_output_tokens": parent_policy.max_response_output_tokens,
                 "tool_concurrency": parent_policy.tool_concurrency,
                 "grants": {
                     "capabilities": sorted(parent_policy.grants.capabilities),
@@ -216,21 +218,24 @@ class Runner:
         if checkpoint.parent_run_id is not None and parent_policy is None:
             raise RuntimeStateError("Resuming a child Run requires its current parent policy.")
         elapsed = checkpoint.execution_seconds_used
-        allowance = min(limits.execution_timeout_seconds, checkpoint.execution_timeout_seconds)
-        remaining = max(0.000001, allowance - elapsed)
+        allowance = tighter(limits.execution_timeout_seconds, checkpoint.execution_timeout_seconds)
+        timeout_remaining = None if allowance is None else max(0.000001, allowance - elapsed)
         deadlines = tuple(value for value in (limits.deadline, checkpoint.absolute_deadline) if value is not None)
         tightened = limits.model_copy(
             update={
-                "execution_timeout_seconds": remaining,
+                "execution_timeout_seconds": timeout_remaining,
                 "deadline": min(deadlines) if deadlines else None,
-                "max_model_steps": min(limits.max_model_steps, checkpoint.max_model_steps),
-                "max_output_tokens": min(limits.max_output_tokens, checkpoint.max_output_tokens),
+                "max_model_steps": tighter(limits.max_model_steps, checkpoint.max_model_steps),
+                "max_output_tokens": tighter(limits.max_output_tokens, checkpoint.max_output_tokens),
+                "max_response_output_tokens": min(
+                    limits.max_response_output_tokens, checkpoint.max_response_output_tokens
+                ),
                 "tool_concurrency": min(limits.tool_concurrency, checkpoint.tool_concurrency),
                 "max_handoffs": min(limits.max_handoffs, checkpoint.max_handoffs),
                 "grants": checkpoint.grants if limits.grants is None else checkpoint.grants.intersect(limits.grants),
             }
         )
-        if elapsed >= allowance:
+        if allowance is not None and elapsed >= allowance:
             tightened = tightened.model_copy(update={"deadline": datetime.now(UTC)})
         policy = effective_policy(tightened, self.host_policy, agent_hints=agent.policy_hints, parent=parent_policy)
         prepared = self.prepare_handoffs(handoffs, policy)
@@ -530,7 +535,9 @@ class Runner:
                         writer.run_id, cancelled=False, suspended=outcome.status is LoopStatus.PAUSED
                     )
                     outcome = replace(outcome, usage=handle.control.collect(writer.run_id, outcome.usage))
-                    if monotonic() - started >= policy.timeout_seconds or datetime.now(UTC) >= policy.deadline:
+                    if (
+                        policy.timeout_seconds is not None and monotonic() - started >= policy.timeout_seconds
+                    ) or expired(policy.deadline):
                         await handle.control.close_scopes(writer.run_id, cancelled=True, suspended=False)
                         outcome = replace(outcome, status=LoopStatus.TIMED_OUT)
                     if outcome.status is LoopStatus.PAUSED:
@@ -539,7 +546,7 @@ class Runner:
                         saved_checkpoint = outcome.checkpoint.model_copy(
                             update={
                                 "execution_seconds_used": prior_seconds + monotonic() - started,
-                                "execution_timeout_seconds": min(
+                                "execution_timeout_seconds": tighter(
                                     limits.execution_timeout_seconds,
                                     limits.execution_timeout_seconds
                                     if checkpoint is None
@@ -658,7 +665,7 @@ class Runner:
             return ResumeProgress(step, checkpoint)
         if active.step_id != checkpoint.step_id:
             raise RuntimeStateError("The persisted step does not match its checkpoint.")
-        if policy.deadline <= datetime.now(UTC):
+        if expired(policy.deadline):
             return ResumeProgress(active, checkpoint, LoopOutcome(LoopStatus.TIMED_OUT, usage=checkpoint.usage))
         assistant = next((value for value in active.messages if isinstance(value, AssistantMessage)), None)
         if assistant is None or not assistant.tool_calls:
@@ -692,8 +699,9 @@ class Runner:
                 parent_run_id=checkpoint.parent_run_id,
                 parent_limits=ParentRunLimits(
                     deadline=policy.deadline,
-                    remaining_model_steps=max(0, policy.max_model_steps - current_usage.total_model_calls),
-                    remaining_output_tokens=max(0, policy.max_output_tokens - current_usage.budget_output_tokens),
+                    max_response_output_tokens=policy.max_response_output_tokens,
+                    remaining_model_steps=remaining(policy.max_model_steps, current_usage.total_model_calls),
+                    remaining_output_tokens=remaining(policy.max_output_tokens, current_usage.budget_output_tokens),
                     tool_concurrency=policy.tool_concurrency,
                     child_model_calls=current_usage.child_model_calls,
                     child_budget_output_tokens=current_usage.child_budget_output_tokens,
@@ -942,6 +950,7 @@ class Runner:
                     execution_timeout_seconds=policy.timeout_seconds,
                     max_model_steps=policy.max_model_steps,
                     max_output_tokens=policy.max_output_tokens,
+                    max_response_output_tokens=policy.max_response_output_tokens,
                     tool_concurrency=policy.tool_concurrency,
                     grants=policy.grants,
                 ),

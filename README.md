@@ -182,6 +182,8 @@ Router 使用短只读 Run，固定输入批次与原子路由提交。每个 Wo
 
 RunHandle 持有活跃执行，暂停保存 RunCheckpoint，继续沿原 run_id 恢复。独立子工作创建 child Execution，互斥预算预留由产品账本结算。Handoff 保留原 Run、Execution 和 Session。日志与 OpenTelemetry 诊断保持独立身份。
 
+SDK 新增与 SubagentGroup 同级的 CollaborationGroup：支持动态创建持续成员、消息、followup、定向中断和持久恢复。接口与离线示例见 [持续协作交付说明](docs/pleiad-agent-collaboration-handoff.md)；该能力尚未发布，也尚未启用到 Weave/Canvas 产品。
+
 运行和恢复机制见 [Pleiad 架构](docs/pleiad-architecture.md) 与 [Weave 架构](docs/weave-architecture.md)。
 
 ## 项目结构
@@ -219,7 +221,7 @@ apps/weave/src/      # 安装后的 Python 包名：pleiad_weave
 
 ## 开发与验证
 
-SDK 与 App 是独立 Python 项目，各自在自己的目录维护依赖、锁文件和测试配置。App 开发环境通过本地路径使用 SDK；发行安装使用 `pleiad[mcp]==0.2.0`，新增多模态图片输入、历史图片授权和原生图片生成/参考编辑 API。发布 Weave 前需先发布此 SDK 版本。
+SDK 与 App 是独立 Python 项目，各自在自己的目录维护依赖、锁文件和测试配置。App 开发环境通过本地路径使用 SDK。发行安装使用 `pleiad[mcp]==0.3.0`，提供持续 Agent 协作、定向输入、协作状态恢复和共享预算。发布 Weave 前需先发布此 SDK 版本。
 
 ```bash
 uv sync --project packages/pleiad --locked --all-groups --all-extras

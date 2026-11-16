@@ -1,9 +1,11 @@
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, replace
 
 from pydantic import Field, model_validator
 
 from pleiad.contracts import ContractModel, UsageCharge
 from pleiad.errors.base import SystemFault
+from pleiad.limits import exhausted, tighter
 from pleiad.tools.contracts import ParentRunLimits
 
 
@@ -14,21 +16,59 @@ class BudgetStateError(SystemFault):
         super().__init__("budget.state_invalid", message)
 
 
+def add_allowance(value: int | None, amount: int | None) -> int | None:
+    """Add finite accounting to an allowance while preserving an unbounded pool."""
+    return None if value is None or amount is None else value + amount
+
+
+def debit_allowance(value: int | None, amount: int | None) -> int | None:
+    """Debit a finite reservation only from a finite parent pool."""
+    if value is None:
+        return None
+    if amount is None:
+        raise BudgetStateError("An unbounded reservation cannot debit a finite pool.")
+    return value - amount
+
+
+def exceeds(value: int | None, ceiling: int | None) -> bool:
+    """Reject finite-pool expansion including an unbounded restored allowance."""
+    return ceiling is not None and (value is None or value > ceiling)
+
+
+def total_allowance(values: Iterable[int | None]) -> int | None:
+    """Sum held allowances, retaining an unbounded reservation exactly."""
+    total = 0
+    for value in values:
+        if value is None:
+            return None
+        total += value
+    return total
+
+
+def excess_usage(used: int, reservation: int | None) -> int:
+    """Charge only actual use beyond a finite exclusive reservation."""
+    return 0 if reservation is None else max(0, used - reservation)
+
+
+def unused_allowance(reservation: int | None, used: int) -> int:
+    """Refund unused finite reservations without inventing unbounded token counts."""
+    return 0 if reservation is None else max(0, reservation - used)
+
+
 class BudgetState(ContractModel):
     """Persist settled allowances and cumulative child charges for one parent."""
 
-    remaining_model_steps: int
-    remaining_output_tokens: int
-    parent_remaining_model_steps: int = Field(ge=0)
-    parent_remaining_output_tokens: int = Field(ge=0)
+    remaining_model_steps: int | None
+    remaining_output_tokens: int | None
+    parent_remaining_model_steps: int | None = Field(ge=0)
+    parent_remaining_output_tokens: int | None = Field(ge=0)
     usage_charges: tuple[UsageCharge, ...] = ()
 
     @model_validator(mode="after")
     def validate_allowance(self) -> "BudgetState":
         """Reject allowance expansion and duplicate cumulative child facts."""
-        if (
-            self.remaining_model_steps > self.parent_remaining_model_steps
-            or self.remaining_output_tokens > self.parent_remaining_output_tokens
+        if exceeds(self.remaining_model_steps, self.parent_remaining_model_steps) or exceeds(
+            self.remaining_output_tokens, self.parent_remaining_output_tokens
         ):
             raise ValueError("Settled child allowance cannot exceed the parent allowance")
         identities = tuple(value.charge_id for value in self.usage_charges)
@@ -41,10 +81,10 @@ class BudgetState(ContractModel):
 class ParentBudget:
     """Share actual parent model admission with exclusive child reservations."""
 
-    remaining_model_steps: int
-    remaining_output_tokens: int
-    parent_remaining_model_steps: int
-    parent_remaining_output_tokens: int
+    remaining_model_steps: int | None
+    remaining_output_tokens: int | None
+    parent_remaining_model_steps: int | None
+    parent_remaining_output_tokens: int | None
     usage_charges: tuple[UsageCharge, ...] = ()
 
 
@@ -53,8 +93,8 @@ class BudgetReservation:
     """Hold exclusive allowance until its original child settles."""
 
     parent_run_id: str
-    model_steps: int
-    output_tokens: int
+    model_steps: int | None
+    output_tokens: int | None
     interrupted: bool = False
 
 
@@ -62,8 +102,8 @@ class ReservationState(ContractModel):
     """Persist one safely paused child's outstanding allowance."""
 
     reservation_id: str = Field(min_length=1)
-    model_steps: int = Field(gt=0)
-    output_tokens: int = Field(gt=0)
+    model_steps: int | None = Field(gt=0)
+    output_tokens: int | None = Field(gt=0)
 
 
 class BudgetCheckpoint(ContractModel):
@@ -79,15 +119,56 @@ class BudgetCheckpoint(ContractModel):
         identities = tuple(item.reservation_id for item in self.reservations)
         if len(identities) != len(set(identities)):
             raise ValueError("Budget checkpoint reservation IDs must be unique")
-        if (
-            self.state.remaining_model_steps + sum(item.model_steps for item in self.reservations)
-            > self.state.parent_remaining_model_steps
-            or self.state.remaining_output_tokens + sum(item.output_tokens for item in self.reservations)
-            > self.state.parent_remaining_output_tokens
+        if exceeds(
+            add_allowance(
+                self.state.remaining_model_steps, total_allowance(item.model_steps for item in self.reservations)
+            ),
+            self.state.parent_remaining_model_steps,
+        ) or exceeds(
+            add_allowance(
+                self.state.remaining_output_tokens, total_allowance(item.output_tokens for item in self.reservations)
+            ),
+            self.state.parent_remaining_output_tokens,
         ):
             raise ValueError("Budget checkpoint reservations cannot exceed the parent allowance")
         if any(value.parent_run_id != self.parent_run_id for value in self.state.usage_charges):
             raise ValueError("Child charges must belong to the checkpoint parent")
+        return self
+
+
+class LiveReservationState(ReservationState):
+    """Persist an outstanding reservation without claiming it is safely paused."""
+
+    parent_run_id: str = Field(min_length=1)
+    interrupted: bool = False
+
+
+class LedgerSnapshot(ContractModel):
+    """Mirror complete shared pools for exclusive-owner factual recovery."""
+
+    pools: dict[str, BudgetState] = Field(default_factory=dict)
+    reservations: tuple[LiveReservationState, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_ownership(self) -> "LedgerSnapshot":
+        """Reject duplicated reservations and dangling parent ownership."""
+        identities = tuple(value.reservation_id for value in self.reservations)
+        if len(identities) != len(set(identities)):
+            raise ValueError("Live reservation identities must be unique")
+        if any(value.parent_run_id not in self.pools for value in self.reservations):
+            raise ValueError("Live reservations require their complete parent pool")
+        for parent, state in self.pools.items():
+            if any(value.parent_run_id != parent for value in state.usage_charges):
+                raise ValueError("Mirrored charges must retain their original parent pool")
+            held = tuple(value for value in self.reservations if value.parent_run_id == parent)
+            if exceeds(
+                add_allowance(state.remaining_model_steps, total_allowance(value.model_steps for value in held)),
+                state.parent_remaining_model_steps,
+            ) or exceeds(
+                add_allowance(state.remaining_output_tokens, total_allowance(value.output_tokens for value in held)),
+                state.parent_remaining_output_tokens,
+            ):
+                raise ValueError("Live reservations cannot expand the parent pool")
         return self
 
 
@@ -101,39 +182,95 @@ class BudgetLedger:
 
     def observe_parent(self, parent_run_id: str, limits: ParentRunLimits) -> ParentBudget:
         """Debit only new parent-owned consumption, excluding already accounted children."""
-        own_steps = limits.remaining_model_steps + limits.child_model_calls
-        own_tokens = limits.remaining_output_tokens + limits.child_budget_output_tokens
+        own_steps = add_allowance(limits.remaining_model_steps, limits.child_model_calls)
+        own_tokens = add_allowance(limits.remaining_output_tokens, limits.child_budget_output_tokens)
         pool = self.pools.get(parent_run_id)
         if pool is None:
             pool = ParentBudget(own_steps, own_tokens, own_steps, own_tokens)
             self.pools[parent_run_id] = pool
         else:
-            steps = min(pool.parent_remaining_model_steps, own_steps)
-            tokens = min(pool.parent_remaining_output_tokens, own_tokens)
-            pool.remaining_model_steps -= pool.parent_remaining_model_steps - steps
-            pool.remaining_output_tokens -= pool.parent_remaining_output_tokens - tokens
+            tightening_steps = pool.parent_remaining_model_steps is None and own_steps is not None
+            tightening_tokens = pool.parent_remaining_output_tokens is None and own_tokens is not None
+            if tightening_steps or tightening_tokens:
+                if any(value.parent_run_id == parent_run_id for value in self.reservations.values()):
+                    raise BudgetStateError("Settle unbounded child reservations before tightening the parent pool.")
+                if tightening_steps:
+                    pool.parent_remaining_model_steps = own_steps
+                    pool.remaining_model_steps = debit_allowance(
+                        own_steps, sum(value.model_steps for value in pool.usage_charges)
+                    )
+                if tightening_tokens:
+                    pool.parent_remaining_output_tokens = own_tokens
+                    pool.remaining_output_tokens = debit_allowance(
+                        own_tokens, sum(value.output_tokens for value in pool.usage_charges)
+                    )
+            steps = tighter(pool.parent_remaining_model_steps, own_steps)
+            tokens = tighter(pool.parent_remaining_output_tokens, own_tokens)
+            pool.remaining_model_steps = debit_allowance(
+                pool.remaining_model_steps, debit_allowance(pool.parent_remaining_model_steps, steps)
+            )
+            pool.remaining_output_tokens = debit_allowance(
+                pool.remaining_output_tokens, debit_allowance(pool.parent_remaining_output_tokens, tokens)
+            )
             pool.parent_remaining_model_steps = steps
             pool.parent_remaining_output_tokens = tokens
         return pool
+
+    def export(self) -> LedgerSnapshot:
+        """Mirror all active pools without changing reservation admission or settlement."""
+        return LedgerSnapshot(
+            pools={key: BudgetState.model_validate(asdict(value)) for key, value in self.pools.items()},
+            reservations=tuple(
+                LiveReservationState(reservation_id=key, **asdict(value))
+                for key, value in sorted(self.reservations.items())
+            ),
+        )
+
+    def import_snapshot(self, snapshot: LedgerSnapshot) -> None:
+        """Restore a complete exclusive-owner mirror without replenishing live allowance."""
+        if self.pools or self.reservations:
+            if self.export() != snapshot:
+                raise BudgetStateError("A recovery mirror cannot replace a different live ledger.")
+            return
+        self.pools.update(
+            (
+                key,
+                ParentBudget(
+                    value.remaining_model_steps,
+                    value.remaining_output_tokens,
+                    value.parent_remaining_model_steps,
+                    value.parent_remaining_output_tokens,
+                    value.usage_charges,
+                ),
+            )
+            for key, value in snapshot.pools.items()
+        )
+        self.reservations.update(
+            (
+                value.reservation_id,
+                BudgetReservation(value.parent_run_id, value.model_steps, value.output_tokens, value.interrupted),
+            )
+            for value in snapshot.reservations
+        )
 
     def reserve(
         self,
         reservation_id: str,
         parent_run_id: str,
         limits: ParentRunLimits,
-        max_model_steps: int,
-        max_output_tokens: int,
+        max_model_steps: int | None,
+        max_output_tokens: int | None,
     ) -> BudgetReservation | None:
         """Reserve disjoint allowance against the same pool used for parent models."""
         if reservation_id in self.reservations:
             raise BudgetStateError("A child budget reservation already exists.")
         pool = self.observe_parent(parent_run_id, limits)
-        steps = min(max_model_steps, pool.remaining_model_steps)
-        tokens = min(max_output_tokens, pool.remaining_output_tokens)
-        if steps < 1 or tokens < 1:
+        steps = tighter(max_model_steps, pool.remaining_model_steps)
+        tokens = tighter(max_output_tokens, pool.remaining_output_tokens)
+        if exhausted(steps) or exhausted(tokens):
             return None
-        pool.remaining_model_steps -= steps
-        pool.remaining_output_tokens -= tokens
+        pool.remaining_model_steps = debit_allowance(pool.remaining_model_steps, steps)
+        pool.remaining_output_tokens = debit_allowance(pool.remaining_output_tokens, tokens)
         reservation = BudgetReservation(parent_run_id, steps, tokens)
         self.reservations[reservation_id] = reservation
         return reservation
@@ -157,15 +294,23 @@ class BudgetLedger:
         if reservation is not None:
             if reservation.parent_run_id != value.parent_run_id:
                 raise BudgetStateError("Child usage belongs to another parent reservation.")
-            pool.remaining_model_steps -= max(0, value.model_steps - reservation.model_steps) - max(
-                0, (0 if previous is None else previous.model_steps) - reservation.model_steps
+            pool.remaining_model_steps = debit_allowance(
+                pool.remaining_model_steps,
+                excess_usage(value.model_steps, reservation.model_steps)
+                - excess_usage(0 if previous is None else previous.model_steps, reservation.model_steps),
             )
-            pool.remaining_output_tokens -= max(0, value.output_tokens - reservation.output_tokens) - max(
-                0, (0 if previous is None else previous.output_tokens) - reservation.output_tokens
+            pool.remaining_output_tokens = debit_allowance(
+                pool.remaining_output_tokens,
+                excess_usage(value.output_tokens, reservation.output_tokens)
+                - excess_usage(0 if previous is None else previous.output_tokens, reservation.output_tokens),
             )
         else:
-            pool.remaining_model_steps -= value.model_steps - (0 if previous is None else previous.model_steps)
-            pool.remaining_output_tokens -= value.output_tokens - (0 if previous is None else previous.output_tokens)
+            pool.remaining_model_steps = debit_allowance(
+                pool.remaining_model_steps, value.model_steps - (0 if previous is None else previous.model_steps)
+            )
+            pool.remaining_output_tokens = debit_allowance(
+                pool.remaining_output_tokens, value.output_tokens - (0 if previous is None else previous.output_tokens)
+            )
         pool.usage_charges = (*(item for item in pool.usage_charges if item.charge_id != value.charge_id), value)
 
     def settle(self, reservation_id: str, charge: UsageCharge | None, *, interrupted: bool = False) -> None:
@@ -173,14 +318,17 @@ class BudgetLedger:
         reservation = self.reservations.get(reservation_id)
         if reservation is None:
             return
+        if charge is None and (reservation.model_steps is None or reservation.output_tokens is None):
+            self.reservations[reservation_id] = replace(reservation, interrupted=True)
+            return
         value = (
             charge
             if charge is not None
             else UsageCharge(
                 parent_run_id=reservation.parent_run_id,
                 charge_id=reservation_id,
-                model_steps=reservation.model_steps,
-                output_tokens=reservation.output_tokens,
+                model_steps=0 if reservation.model_steps is None else reservation.model_steps,
+                output_tokens=0 if reservation.output_tokens is None else reservation.output_tokens,
             )
         )
         if value.charge_id != reservation_id:
@@ -191,8 +339,12 @@ class BudgetLedger:
             return
         self.reservations.pop(reservation_id)
         pool = self.pools[reservation.parent_run_id]
-        pool.remaining_model_steps += max(0, reservation.model_steps - value.model_steps)
-        pool.remaining_output_tokens += max(0, reservation.output_tokens - value.output_tokens)
+        pool.remaining_model_steps = add_allowance(
+            pool.remaining_model_steps, unused_allowance(reservation.model_steps, value.model_steps)
+        )
+        pool.remaining_output_tokens = add_allowance(
+            pool.remaining_output_tokens, unused_allowance(reservation.output_tokens, value.output_tokens)
+        )
 
     def snapshot(self, parent_run_id: str) -> BudgetState | None:
         """Read settled facts when no child remains outstanding."""

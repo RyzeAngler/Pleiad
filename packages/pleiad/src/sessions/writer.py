@@ -211,7 +211,7 @@ class SessionWriter:
         model: str,
         request_digest: str,
         max_output_tokens: int,
-        deadline: datetime,
+        deadline: datetime | None,
         usage: RunUsage,
     ) -> ModelAttemptRecord | None:
         """Commit one model attempt and its actual authorized output allowance."""

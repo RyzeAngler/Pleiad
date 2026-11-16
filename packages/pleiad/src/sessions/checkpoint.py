@@ -25,12 +25,13 @@ class RunCheckpoint(ContractModel):
     active_agent: str = Field(min_length=1, max_length=256)
     agent_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     step_id: str | None = Field(default=None, min_length=1, max_length=256)
-    deadline: datetime
-    execution_timeout_seconds: float = Field(gt=0, allow_inf_nan=False)
+    deadline: datetime | None
+    execution_timeout_seconds: float | None = Field(gt=0, allow_inf_nan=False)
     absolute_deadline: datetime | None = None
     execution_seconds_used: float = Field(default=0.0, ge=0, allow_inf_nan=False)
-    max_model_steps: int = Field(gt=0)
-    max_output_tokens: int = Field(gt=0)
+    max_model_steps: int | None = Field(gt=0)
+    max_output_tokens: int | None = Field(gt=0)
+    max_response_output_tokens: int = Field(default=8_192, gt=0)
     tool_concurrency: int = Field(gt=0)
     max_handoffs: int = Field(gt=0)
     grants: CapabilityGrants

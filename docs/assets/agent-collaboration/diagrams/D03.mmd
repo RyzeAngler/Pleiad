@@ -1,0 +1,13 @@
+flowchart TB
+    Host["宿主 Python 调用"] --> API
+    Tools["协作模型工具<br/>ToolRuntime 校验"] --> Endpoint["MemberEndpoint<br/>绑定可信调用成员"]
+    Endpoint --> API["CollaborationGroup<br/>公共组合入口"]
+    API --> Dispatch["调度与拥有者<br/>准入 / 队列 / handle / 关闭"]
+    API --> Inbox["投递与事件投影<br/>outbox / 水位 / 结果通知"]
+    Dispatch --> Auth["宿主准入回调<br/>业务授权 / 能力绑定"]
+    Dispatch --> Store["CollaborationStore<br/>状态转换 / 幂等 / 事务"]
+    Inbox --> Store
+    Dispatch --> Ledger["BudgetLedger<br/>共享预算算法"]
+    Dispatch --> Runner["Runner / RunHandle<br/>现有执行与取消"]
+    Inbox -->|投递并核对消费| Session["SessionStore / SessionWriter<br/>单 writer / 输入 / Run / 恢复"]
+    Runner --> Session

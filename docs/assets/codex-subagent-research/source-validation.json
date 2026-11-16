@@ -1,0 +1,10 @@
+{
+  "commit": "c0cc9fc820f62e4dbdde68214dd6d792d6c8a7ee",
+  "cachedFiles": 66,
+  "sourceReferencesChecked": 46,
+  "referenceUsesChecked": 61,
+  "unresolvedReferences": 0,
+  "allRangesWithinPinnedSource": true,
+  "manifestHashesMatch": true,
+  "scope": "Citation structure, cached source integrity and document whitespace/links; not Rust execution."
+}

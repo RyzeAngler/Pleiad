@@ -1,0 +1,16 @@
+flowchart TB
+    M["模型输出协作工具调用"] --> T["tools/handlers/multi_agents_v2<br/>参数、工具回执、活动事件"]
+    T --> P["thread_spawn / child_config<br/>可信父身份、配置与继承"]
+    T --> A["AgentControl 契约"]
+    P --> A
+    A --> L["LocalAgentControl<br/>本次主要追踪的实现"]
+    L --> RT["LocalAgentRuntime<br/>整树共享所有权"]
+    RT --> REG["AgentRegistry<br/>身份、路径、预留"]
+    RT --> CAP["ExecutionLimiter + Residency<br/>活跃轮次与驻留实例"]
+    RT --> MB["Mailboxes<br/>卸载成员的内存待投递消息"]
+    L --> TM["ThreadManagerState"]
+    TM --> CT["CodexThread + Session<br/>提交循环、历史、工具与模型"]
+    CT --> Q["InputQueue + ActiveTurn"]
+    CT --> STORE["ThreadStore / AgentGraphStore"]
+    CT --> TASK["RegularTask<br/>模型与工具循环"]
+    HOST["可选 Host 所有权<br/>准入、用量与完成报告"] -.另一装配边界.-> CT

@@ -40,7 +40,7 @@ SessionStore 保存已经发生的交互，Context 为当前模型请求选择�
 
 ### 编排复用 Runtime
 
-Handoff 在同一 Run 内切换 Agent，SubagentGroup 建立父 Run 范围内的独立子调用，Graph 用依赖关系组织节点。三者表达不同协作方式，Agent 执行都复用 Runner；Graph 也允许直接执行普通异步函数。
+Handoff 在同一 Run 内切换 Agent，SubagentGroup 建立父 Run 范围内的独立子调用，Graph 用依赖关系组织节点。新增 CollaborationGroup 为同级持续协作模式，保留稳定成员和 Session，并支持动态创建、消息、活跃追加与空闲新轮。四种模式表达不同协作方式，Agent 执行都复用 Runner；Graph 也允许直接执行普通异步函数。
 
 Pleiad 的 Run 表示一次框架调用。用户作业的持久化身份、排队和产品终态由宿主维护，使框架能够服务于不同应用，而不绑定某种产品任务模型。
 
@@ -103,7 +103,7 @@ flowchart TB
     Execution["隔离代码执行<br/>运行单元"]
 
     subgraph Library["Pleiad 库边界：宿主应用进程内"]
-        Orchestration["Orchestration<br/>Python 组件：Graph、Handoff、SubagentGroup"]
+        Orchestration["Orchestration<br/>Python 组件：Graph、Handoff、SubagentGroup、CollaborationGroup"]
         Runner["Runner<br/>Python 组件：统一调用与生命周期"]
         Context["Context<br/>Python 组件：选择、渲染与压缩"]
         Memory["SessionStore<br/>Python 组件：输入、消息、Run 与 ModelStep 完整性"]
@@ -174,3 +174,38 @@ Node 的 unknown 外部效果保留 NodeStatus.UNKNOWN，Graph 返回 failed 与
 代码归属可从 [Agent](../packages/pleiad/src/agent/agent.py)、[Runner](../packages/pleiad/src/runtime/runner.py) 和 [GraphExecutor](../packages/pleiad/src/orchestration/graph/executor.py) 继续追踪。产品持久化、能力策略及界面协作在 [Weave 文档](weave-architecture.md) 中说明。
 
 RunSnapshot 持久 parent_run_id。宿主可以用 SessionStore.descendant_sessions(parent_run_ids) 查回完整递归子 Session，随后对已经结算的 Session 调用 clear。默认两种后端以一致快照解析拥有关系，包含独立父 Run 的复用 Session 会明确拒绝归入清理范围。产品的清理代次、文件与 tombstone 仍由 Weave 管理。
+
+## 持续协作模式
+
+CollaborationGroup 的作用域由宿主 async context 拥有，可以跨多个根 Run；成员不是产品 Execution。新 Work 通过宿主准入建立业务关联，复用现有 Runner、Session、ToolScope 和同一个 BudgetLedger。活跃 followup 关联原 Run，不创建新作业；空闲或结束门关闭后的 followup 创建新 Work。
+
+协作关系与命令、事件、outbox 持久化在独立 collaboration.sqlite3；SessionStore 保留输入、ModelStep、Run 和原收据。定向输入的目标与实际消费分开，已取消旧轮输入不被新轮误领。父 Run 结束会结算所拥有工作，成员身份仍保留；父子暂停恢复维持原 Run 与预留。未知在途结果必须由宿主独占对账，不自动重放模型或收费操作。
+
+实际接口、完整离线示例、双后端验证与限制见 [持续协作交付说明](pleiad-agent-collaboration-handoff.md)，架构图见 [持续协作设计](pleiad-agent-collaboration-architecture.md)。
+
+
+### Explicitly unbounded Run dimensions
+
+`RunLimits` and `HostPolicy` keep their finite defaults. A host can explicitly set
+`max_model_steps`, `max_output_tokens`, and the execution timeout to `None` to
+remove the corresponding cumulative Run ceiling. Every finite host, Agent,
+parent, or requested limit still participates in the intersection. A deadline is
+absent only when no finite execution timeout or absolute deadline applies.
+
+`RunLimits.max_response_output_tokens` is a separate positive per-response ceiling
+with a default of 8192. It is included in invocation identity, parent propagation,
+and persisted checkpoints. Provider transport timeouts and Tool policies continue
+to govern individual operations. Explicit cancellation still settles owned work.
+
+Shared budget pools, child reservations, checkpoints, and collaboration journal
+snapshots retain `None` directly. A finite parent bounds an unbounded child request.
+Actual usage charges remain finite facts. An unknown unbounded child retains its
+outstanding interrupted reservation until actual usage is available, preserving
+its recovery boundary without inventing an upper-bound charge.
+
+
+Image-bearing completed steps remain pinned during history compaction. Every
+omitted complete text step is eligible for the rolling summary, including text
+between a pinned image and the recent suffix. The summary cursor can cross a
+pinned image because that image-bearing step remains visible on every subsequent
+request. Restored summaries continue with newly omitted text steps in sequence.

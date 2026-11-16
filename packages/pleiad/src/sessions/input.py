@@ -63,6 +63,8 @@ class InputRecord(ContractModel):
     sequence: int = Field(ge=1)
     accepted_at: AwareDatetime
     run_id: str | None = None
+    invocation_id: str | None = Field(default=None, min_length=1, max_length=256)
+    target_run_id: str | None = Field(default=None, min_length=1, max_length=256)
     step_id: str | None = None
 
     def receipt(self, *, duplicate: bool) -> InputReceipt:

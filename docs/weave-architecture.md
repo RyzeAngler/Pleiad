@@ -64,6 +64,8 @@ Execution 状态包括 queued、running、waiting_input、waiting_approval、wai
 
 Execution 具有总预算。子 Execution 和 Graph 调用按实际剩余额度预留。SDK usage 按 invocation 累计结算，恢复原 Run 延续此前已计费额度。完成父任务前验证输入责任、必要子任务、检查证据和产物。未知外部效果保留为需要核实的事实。
 
+Pleiad 0.3.0 将累计输出预算与单次响应上限分开。Weave 在创建和恢复 Worker Run 时显式传递任务输出额度作为单次响应上限，专项 Subagent 同样传递其 16,384 token 上限。实际模型请求仍受剩余任务预算、宿主及父 Run 共同约束，取消且供应商未报告用量时按已准入请求的额度结算。
+
 必需验证使用 `artifact_integrity` 或 `tool_result` 的具体要求，分别绑定交付产物名称，或精确工具代码、参数与预期结果字段。宿主读取实际字节、SDK 工具结果或后台 OperationResult，独立产生 host Verification。Worker 自报的检查保持来源区分。
 
 启动恢复先检查 Session 和调用收据。已确认结果可以继续结算，安全检查点可以恢复。缺少确认的外部动作经证据核对后进入明确状态。取消等待拥有者完成 SDK 清理和持久结算。

@@ -97,7 +97,9 @@ def descendant_session_ids(states: tuple[SessionState, ...], parent_run_ids: tup
 
 def updated_state(state: SessionState, **updates: object) -> SessionState:
     """Validate a committed journal revision after applying typed transitions."""
-    return SessionState.model_validate({**state.model_dump(), **updates, "revision": state.revision + 1})
+    return SessionState.model_validate(
+        {**state.model_dump(exclude=set(updates)), **updates, "revision": state.revision + 1}
+    )
 
 
 def replace_run(state: SessionState, snapshot: RunSnapshot, **updates: object) -> SessionState:
@@ -222,7 +224,9 @@ class SessionStore(ABC):
     async def descendant_sessions(self, parent_run_ids: tuple[str, ...]) -> tuple[str, ...]:
         """Read Sessions recursively owned by the supplied committed parent Run identities."""
 
-    async def enqueue(self, session_id: str, value: InputEnvelope) -> InputReceipt:
+    async def enqueue(
+        self, session_id: str, value: InputEnvelope, *, run_id: str | None = None, invocation_id: str | None = None
+    ) -> InputReceipt:
         """Accept one input or return its original idempotent receipt."""
         digest = value.payload_digest()
 
@@ -231,14 +235,26 @@ class SessionStore(ABC):
                 if record.envelope.input_id == value.input_id:
                     if record.payload_digest != digest:
                         raise SessionConflictError("The input ID already has different content.")
+                    if record.target_run_id != run_id:
+                        raise SessionConflictError("The input ID belongs to another Run.")
+                    if record.invocation_id != invocation_id:
+                        raise SessionConflictError("The input ID has a different invocation target.")
                     return state, record.receipt(duplicate=True)
             if value.kind == "operation_result":
                 raise SessionConflictError("Operation results must be committed with their original backend outcome.")
+            if run_id is not None:
+                owner = next((item for item in state.runs if item.run_id == run_id), None)
+                if owner is None or owner.state not in {RunStatus.RUNNING, RunStatus.WAITING_EVENT}:
+                    raise SessionConflictError("Targeted input requires an active Run.")
+                if owner.input_mode != "live" or invocation_id not in {None, owner.invocation_id}:
+                    raise SessionConflictError("Targeted input requires the matching live invocation.")
             record = InputRecord(
                 envelope=value,
                 payload_digest=digest,
                 sequence=len(state.inputs) + 1,
                 accepted_at=datetime.now(UTC),
+                target_run_id=run_id,
+                invocation_id=invocation_id,
             )
             return updated_state(state, inputs=(*state.inputs, record)), record.receipt(duplicate=False)
 
@@ -280,7 +296,13 @@ class SessionStore(ABC):
                 next((value for value in state.inputs if value.envelope.input_id == identity), None)
                 for identity in input_ids
             )
-            if any(value is None or value.run_id is not None for value in records):
+            if any(
+                value is None
+                or value.run_id is not None
+                or value.target_run_id is not None
+                or value.invocation_id not in {None, invocation_id}
+                for value in records
+            ):
                 raise SessionConflictError("Run inputs must be accepted and unclaimed.")
             sequences = tuple(value.sequence for value in records if value is not None)
             if sequences != tuple(sorted(sequences)):
@@ -359,6 +381,10 @@ class SessionStore(ABC):
             selected: list[InputRecord] = []
             for value in state.inputs:
                 if not consume_inputs or value.step_id is not None:
+                    continue
+                if value.invocation_id is not None and value.invocation_id != snapshot.invocation_id:
+                    continue
+                if value.target_run_id is not None and value.target_run_id != run_id:
                     continue
                 operation = next(
                     (item for item in state.operations if item.operation_id == value.envelope.causation_id), None
@@ -776,7 +802,7 @@ class SessionStore(ABC):
         model: str,
         request_digest: str,
         max_output_tokens: int,
-        deadline: datetime,
+        deadline: datetime | None,
         usage: RunUsage,
         expected_epoch: int,
         expected_revision: int,
@@ -813,7 +839,7 @@ class SessionStore(ABC):
             now = datetime.now(UTC)
             attempt = (
                 None
-                if deadline <= now
+                if deadline is not None and deadline <= now
                 else ModelAttemptRecord(
                     attempt_id=attempt_id,
                     step_id=step_id,

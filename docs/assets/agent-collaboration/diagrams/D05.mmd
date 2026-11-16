@@ -1,0 +1,53 @@
+classDiagram
+    class CollaborationGroup {
+      scope_id
+      open()
+      close()
+      recover()
+    }
+    class AgentProfile {
+      profile_id
+      binding_revision
+      allowed_capabilities
+    }
+    class Member {
+      member_id
+      parent_member_id
+      session_id
+      lifecycle
+    }
+    class WorkRecord {
+      work_id
+      owner_run_id
+      invocation_id
+      run_id
+      permit_id
+      phase
+    }
+    class Session {
+      session_id
+      enqueue()
+    }
+    class Run {
+      run_id
+      parent_run_id
+      receipt
+      checkpoint
+    }
+    class MessageDelivery {
+      message_id
+      kind
+      route
+      input_id
+      source_member_id
+      target_member_id
+      consumed_step_id
+    }
+    CollaborationGroup "1" *-- "1..*" Member
+    AgentProfile "1" <-- "0..*" Member : selected profile
+    Member "1" --> "1" Session : retains
+    Member "1" *-- "0..*" WorkRecord
+    WorkRecord "1" --> "0..1" Run : invokes
+    Session "1" *-- "0..*" Run
+    Member "1" <-- "0..*" MessageDelivery : recipient
+    Member "0..1" <-- "0..*" Member : created by

@@ -1,0 +1,16 @@
+sequenceDiagram
+    participant C as 调用者
+    participant G as 协作事务与调度器
+    participant H as Run A Handle
+    participant S as SessionStore
+    C->>G: interrupt(expected_run=A, request=I)
+    G->>G: 校验 A / 保存 stopping / 阻止 B 启动
+    G->>H: cancel(reason)
+    H->>H: 关闭模型流与工具 / 等待清理
+    H->>S: 提交 A 的 receipt 与未知效果事实
+    H-->>G: 已结算本地调用
+    G->>G: 保存控制回执 / 结算预算
+    G-->>C: settled(A, effect_resolution)
+    G->>G: 若 B 授权仍有效，允许启动
+    C->>G: 重送 interrupt(I, expected_run=A)
+    G-->>C: 原控制回执，不影响 B

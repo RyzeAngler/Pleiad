@@ -1,0 +1,29 @@
+sequenceDiagram
+    participant P as 主成员
+    participant G as 协作组 / inbox
+    participant A as 子成员 Run A
+    participant S as 子 Session
+    participant B as 子成员 Run B
+    P->>G: send_message(补充信息)
+    G-->>P: received(message_id)
+    G->>S: enqueue(稳定 input_id)
+    A->>S: 下一安全边界 begin_step
+    S-->>A: 已排序输入
+    G->>S: 读取 input.step_id
+    G-->>P: consumed(message_id, step_id)
+    P->>G: followup(追加要求，A输入闸门开放)
+    G->>G: 固定 route=active_run / 原work与预算
+    G-->>P: accepted(message_id, work_A, run_A)
+    G->>S: enqueue(显式工作输入)
+    A->>S: 安全步骤消费追加要求
+    A->>S: 提交 Run A 的结果
+    A-->>G: 已结算
+    G->>G: 结算 A / 投递父成员结果引用
+    P->>G: followup(新任务，A已结束)
+    G->>G: route=new_work / 新授权和预算预留
+    G-->>P: accepted(message_id, work_B)
+    G->>G: 重新校验 B 授权和期限
+    G->>S: enqueue(work_B 初始输入)
+    G->>B: start(同 Session, 新 invocation)
+    B->>S: 读取已完成历史
+    G-->>P: 新事件 / 父 inbox 结果

@@ -36,9 +36,10 @@ class ToolPolicy(ContractModel):
 class ParentRunLimits(ContractModel):
     """Remaining parent Run limits visible at a nested execution boundary."""
 
-    deadline: datetime
-    remaining_model_steps: int = Field(ge=0)
-    remaining_output_tokens: int = Field(ge=0)
+    deadline: datetime | None
+    remaining_model_steps: int | None = Field(ge=0)
+    remaining_output_tokens: int | None = Field(ge=0)
+    max_response_output_tokens: int = Field(default=8_192, gt=0)
     child_model_calls: int = Field(default=0, ge=0)
     child_budget_output_tokens: int = Field(default=0, ge=0)
     tool_concurrency: int = Field(gt=0)

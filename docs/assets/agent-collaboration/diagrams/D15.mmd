@@ -1,0 +1,12 @@
+flowchart TD
+    Req["工作准入请求"] --> Auth["当前授权 + 父剩余额度"]
+    Auth --> Reserve["BudgetLedger.reserve<br/>以 work_id 为预留身份"]
+    Reserve --> Commit["持久 work + reservation + dispatch意图"]
+    Commit --> Start["Runner 模型准入<br/>保存保守 model attempt费用"]
+    Start --> Outcome{"调用结果是否有确认用量"}
+    Outcome -->|有| Known["按原Run累计实际/保守用量结算"]
+    Outcome -->|无| Unknown["保留未知测量<br/>按已准入上限占用"]
+    Known --> Refund["只返还已确认未使用部分"]
+    Unknown --> Hold["等待可信证据，不自动退款"]
+    Refund --> Parent["父Run按稳定charge_id合并"]
+    Hold --> Parent

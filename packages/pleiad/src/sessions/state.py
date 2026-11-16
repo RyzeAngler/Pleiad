@@ -92,6 +92,14 @@ class SessionState(ContractModel):
         for value in self.inputs:
             if value.run_id is not None and value.run_id not in run_ids:
                 raise ValueError("Claimed inputs require an accepted Run")
+            if value.target_run_id is not None and value.target_run_id not in run_ids:
+                raise ValueError("Targeted inputs require an accepted Run")
+            if value.target_run_id is not None and value.run_id is not None and value.target_run_id != value.run_id:
+                raise ValueError("Targeted input cannot be claimed by another Run")
+            if value.invocation_id is not None and value.run_id is not None:
+                owner = next(item for item in self.runs if item.run_id == value.run_id)
+                if owner.invocation_id != value.invocation_id:
+                    raise ValueError("Reserved input cannot be claimed by another invocation")
             if value.step_id is not None:
                 step = steps.get(value.step_id)
                 if step is None or step.run_id != value.run_id or value.envelope.input_id not in step.input_ids:

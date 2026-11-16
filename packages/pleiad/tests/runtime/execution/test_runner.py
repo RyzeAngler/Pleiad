@@ -1669,6 +1669,10 @@ def test_start_retry_rejects_changed_parent_restrictions_but_keeps_identical_inv
             parent_policy=parent,
         )
         assert retried is handle and len(model.requests) == 1
+        assert parent.timeout_seconds is not None
+        assert parent.deadline is not None
+        assert parent.max_model_steps is not None
+        assert parent.max_output_tokens is not None
         match changed:
             case "timeout":
                 different = replace(parent, timeout_seconds=parent.timeout_seconds - 1)
@@ -2240,3 +2244,93 @@ def test_cancellation_at_model_completed_notification_keeps_the_already_recorded
         assert cancelled.usage.budget_output_tokens == 1
 
     asyncio.run(scenario())
+
+
+def test_unbounded_run_exceeds_default_steps_and_cumulative_output_with_finite_responses(tmp_path: Path) -> None:
+    model = FakeOpenAIModel(
+        (*(tool_batch(f"call-{index}") for index in range(35)), text_batch("finished", "final")),
+        report_usage=False,
+    )
+    runner, agent = make_runner(model, tmp_path, successful_tool)
+    runner.host_policy = HostPolicy(timeout_seconds=None, max_model_steps=None, max_output_tokens=None)
+    limits = RunLimits(
+        execution_timeout_seconds=None, max_model_steps=None, max_output_tokens=None, max_response_output_tokens=256
+    )
+    result = asyncio.run(run_agent(runner, agent, "Finish all work", limits=limits))
+    assert isinstance(result, RunResult) and result.state is RunStatus.SUCCEEDED
+    assert result.final_output == "finished"
+    assert result.usage.model_calls == 36
+    assert result.usage.budget_output_tokens == 36 * 256
+    assert [request.max_completion_tokens for request in model.requests] == [256] * 36
+
+
+def test_unbounded_checkpoint_restores_response_limit_without_adding_run_ceilings(tmp_path: Path) -> None:
+    runner, agent, tool = make_resume_runner(tmp_path)
+    runner.host_policy = HostPolicy(
+        timeout_seconds=None, max_model_steps=None, max_output_tokens=None, grants=runner.host_policy.grants
+    )
+    session = Session("unbounded-recovery", SqliteSessionStore(tmp_path / "unbounded.sqlite3"))
+    limits = RunLimits(
+        execution_timeout_seconds=None, max_model_steps=None, max_output_tokens=None, max_response_output_tokens=37
+    )
+
+    async def scenario() -> None:
+        paused = await run_agent(runner, agent, "Approve", session=session, limits=limits)
+        assert isinstance(paused, RunSuspension)
+        checkpoint = RunCheckpoint.from_json(paused.checkpoint.to_json())
+        assert checkpoint.deadline is None and checkpoint.execution_timeout_seconds is None
+        assert checkpoint.max_model_steps is None and checkpoint.max_output_tokens is None
+        assert checkpoint.max_response_output_tokens == 37
+        resumed = await resume_agent(
+            runner, agent, checkpoint, session=session, limits=limits, decisions=(approved_resolution(),)
+        )
+        assert isinstance(resumed, RunResult) and resumed.state is RunStatus.SUCCEEDED
+        assert resumed.final_output == "resumed"
+        assert tool.contexts[0].parent_limits is not None
+        assert tool.contexts[0].parent_limits.deadline is None
+        assert tool.contexts[0].parent_limits.remaining_model_steps is None
+        assert tool.contexts[0].parent_limits.max_response_output_tokens == 37
+
+    asyncio.run(scenario())
+
+
+def test_unbounded_provider_wait_still_obeys_explicit_user_cancellation(tmp_path: Path) -> None:
+    model = BlockingOpenAIModel()
+    runner, agent = make_runner(model, tmp_path)
+    runner.host_policy = HostPolicy(timeout_seconds=None, max_model_steps=None, max_output_tokens=None)
+    limits = RunLimits(
+        execution_timeout_seconds=None, max_model_steps=None, max_output_tokens=None, max_response_output_tokens=19
+    )
+
+    async def scenario() -> None:
+        handle = await start_agent(runner, agent, "wait", limits=limits)
+        async with handle:
+            await asyncio.wait_for(model.started.wait(), 3)
+            await handle.cancel(reason="user_requested")
+            result = await handle.result()
+        assert isinstance(result, RunResult) and result.state is RunStatus.CANCELLED
+        assert result.usage.model_calls == 1
+        assert result.usage.budget_output_tokens == 19
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("restricted_by", ["host", "run", "parent", "agent"])
+def test_unbounded_policy_retains_each_explicit_finite_ancestor_restriction(restricted_by: str) -> None:
+    host = HostPolicy(timeout_seconds=None, max_model_steps=None, max_output_tokens=None)
+    limits = RunLimits(execution_timeout_seconds=None, max_model_steps=None, max_output_tokens=None)
+    finite = RunLimits(execution_timeout_seconds=10.0, max_model_steps=3, max_output_tokens=40)
+    parent = None
+    hints = None
+    if restricted_by == "host":
+        host = HostPolicy(timeout_seconds=10.0, max_model_steps=3, max_output_tokens=40)
+    elif restricted_by == "run":
+        limits = finite
+    elif restricted_by == "parent":
+        parent = effective_policy(finite, host)
+    else:
+        hints = AgentPolicyHints(timeout_seconds=10.0, max_model_steps=3, max_output_tokens=40)
+    policy = effective_policy(limits, host, parent=parent, agent_hints=hints)
+    assert policy.max_model_steps == 3 and policy.max_output_tokens == 40
+    assert policy.timeout_seconds is not None and 0 < policy.timeout_seconds <= 10
+    assert policy.deadline is not None

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pleiad"
-version = "0.2.0"
+version = "0.3.0"
 description = "A provider-neutral runtime for building and executing Agents."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -115,6 +115,7 @@ select = ["ANN", "ASYNC", "B", "C4", "D", "E", "F", "I", "RUF", "S", "SIM", "UP"
 max-complexity = 10
 
 [tool.ruff.lint.per-file-ignores]
+"examples/**/*.py" = ["D100"]
 "tests/**/*.py" = ["D", "S101"]
 "**/tests/**/*.py" = ["D", "S101"]
 "**/__init__.py" = ["D104"]

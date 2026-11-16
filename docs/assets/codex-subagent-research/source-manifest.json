@@ -1,0 +1,407 @@
+{
+  "repository": "openai/codex",
+  "commit": "c0cc9fc820f62e4dbdde68214dd6d792d6c8a7ee",
+  "commitTimeUTC": "2026-11-12T05:21:30Z",
+  "retrieved": "2026-11-12",
+  "method": "GitHub connector fetch_file at fixed commit; targeted source and test-source reading",
+  "scope": "Downloaded source inventory, not a claim that every line was audited. No Rust tests executed.",
+  "fileCount": 66,
+  "files": [
+    {
+      "path": "codex-rs/core/src/agent/agent_resolver.rs",
+      "lines": 30,
+      "sha256": "937b7e27ea39a5970ee0ad9696aad8db8d118a118313d83fb4ea0bc8b632946a",
+      "bytes": 940
+    },
+    {
+      "path": "codex-rs/core/src/agent/api.rs",
+      "lines": 251,
+      "sha256": "768b6074421fb317fe1ee378d5246a65fbac89bbb8752b7045b8bdf3a6559a20",
+      "bytes": 10485
+    },
+    {
+      "path": "codex-rs/core/src/agent/child_config.rs",
+      "lines": 393,
+      "sha256": "2d56af205cf47732d04aab117f7d305346ff7f2b08868beeecc8b4f073c83356",
+      "bytes": 14532
+    },
+    {
+      "path": "codex-rs/core/src/agent/control/api.rs",
+      "lines": 329,
+      "sha256": "64184e5f2927f5befbc3f08baefb8dc4ed6d750b541b16d68a5dab2c4225dd46",
+      "bytes": 12729
+    },
+    {
+      "path": "codex-rs/core/src/agent/control/budget.rs",
+      "lines": 39,
+      "sha256": "5ab77ab8eb202c21e9c53aca921429f8abae53b1f857ff4f3128ac90d87a54f3",
+      "bytes": 1241
+    },
+    {
+      "path": "codex-rs/core/src/agent/control/completion.rs",
+      "lines": 155,
+      "sha256": "1f7a82036f5da1460af1a75c6a139278439bccac0421c0084ba92dd4c830b198",
+      "bytes": 6050
+    },
+    {
+      "path": "codex-rs/core/src/agent/control/delivery.rs",
+      "lines": 45,
+      "sha256": "e5e93d5eb3ca6deb7cf1b1b4914644c0d844324cc30197e5c51c6a5582295a16",
+      "bytes": 1618
+    },
+    {
+      "path": "codex-rs/core/src/agent/control/execution.rs",
+      "lines": 92,
+      "sha256": "128b4e565f0bf56ea765959fa2bab8411c28cfe60f289ed94d4bfdac73fba7eb",
+      "bytes": 2836
+    },
+    {
+      "path": "codex-rs/core/src/agent/control/execution_tests.rs",
+      "lines": 64,
+      "sha256": "5f17dffed5e103a6ef21121b870402b9cc2ed4f152ac66d2333a0027cedd5f2c",
+      "bytes": 2134
+    },
+    {
+      "path": "codex-rs/core/src/agent/control/interrupt.rs",
+      "lines": 52,
+      "sha256": "5974b73824956e8ffa86c9183715d7db3ce4f3227e9b67df225056c731ed4ea1",
+      "bytes": 1949
+    },
+    {
+      "path": "codex-rs/core/src/agent/control/mailbox.rs",
+      "lines": 116,
+      "sha256": "3ad60664879f8ee349724c35e0b7e56f12592da4e932225e7957cc071b385ae7",
+      "bytes": 4018
+    },
+    {
+      "path": "codex-rs/core/src/agent/control/residency.rs",
+      "lines": 350,
+      "sha256": "a7cd362e3c9d201d31b4869777fa893f2a010b98afdbf1da65634504ba450f47",
+      "bytes": 12422
+    },
+    {
+      "path": "codex-rs/core/src/agent/control/residency_tests.rs",
+      "lines": 267,
+      "sha256": "72c9b816eb0921d92bbb4584d3c271421230a37b42f44e2a3a76753e2c8268a6",
+      "bytes": 9998
+    },
+    {
+      "path": "codex-rs/core/src/agent/control/runtime.rs",
+      "lines": 378,
+      "sha256": "5eb1152008e32a68d80d1b9120da0c7389affe7d7e881651dcd01195c72520a4",
+      "bytes": 13225
+    },
+    {
+      "path": "codex-rs/core/src/agent/control/runtime_tests.rs",
+      "lines": 260,
+      "sha256": "fa0912466f4691f556ee094a0d87390d8d16501dd7c0eea7e9420e0063efe65f",
+      "bytes": 8814
+    },
+    {
+      "path": "codex-rs/core/src/agent/control/spawn.rs",
+      "lines": 1233,
+      "sha256": "9a4526652bc04b085b891786f17fda36bab6f3113639bc2b9baee6f3408b9078",
+      "bytes": 53456
+    },
+    {
+      "path": "codex-rs/core/src/agent/control/spawn_guard.rs",
+      "lines": 125,
+      "sha256": "184d302e8507153c48eaee0b0ef52582180b692577f3bb7df444d833beb119d4",
+      "bytes": 4871
+    },
+    {
+      "path": "codex-rs/core/src/agent/control/spawn_publication_tests.rs",
+      "lines": 359,
+      "sha256": "2a98f7c1f0f939acdd0446b9160dbe58cd6359ad5fbef9ccc2556e0ab0a61807",
+      "bytes": 12004
+    },
+    {
+      "path": "codex-rs/core/src/agent/control/target.rs",
+      "lines": 61,
+      "sha256": "e267e7a7150f279ab70f0f71ee351039cd6e6ae5200c4310bcfde12fcf10d8b7",
+      "bytes": 2047
+    },
+    {
+      "path": "codex-rs/core/src/agent/control/watch.rs",
+      "lines": 65,
+      "sha256": "8de160e3e314ef4e51ce4a3c8383a3375d1204ab237ea0a25ad861ffa7d62dac",
+      "bytes": 2684
+    },
+    {
+      "path": "codex-rs/core/src/agent/control.rs",
+      "lines": 772,
+      "sha256": "49f6718faaf482af07e1a4b4a0852e273551f37bced9c637ae5f5425d170c1b0",
+      "bytes": 27916
+    },
+    {
+      "path": "codex-rs/core/src/agent/control_tests.rs",
+      "lines": 6200,
+      "sha256": "552e05cedb03f2dd8d03c4f58532ee4f9722a0e9b3ebf5f648736091cda8a7d1",
+      "bytes": 223838
+    },
+    {
+      "path": "codex-rs/core/src/agent/history.rs",
+      "lines": 483,
+      "sha256": "09b45d2b2612551f87c924c1727b4dd6b1b934336b156ccd53d98336db87cc2f",
+      "bytes": 21066
+    },
+    {
+      "path": "codex-rs/core/src/agent/host/admission.rs",
+      "lines": 30,
+      "sha256": "c3a21a582c46cd664da8fad212b562a3a344e72bf296f003b071513a93edaf4c",
+      "bytes": 1304
+    },
+    {
+      "path": "codex-rs/core/src/agent/host/mod.rs",
+      "lines": 38,
+      "sha256": "b5c24b2fae38865c0505f42a1510fcf6d3ab7a5750576bd4a84531f359e2b1b3",
+      "bytes": 1323
+    },
+    {
+      "path": "codex-rs/core/src/agent/host/ownership.rs",
+      "lines": 60,
+      "sha256": "051cb5b6fd5154164ac6bf2fb58bbc8e012ecee973253ecc894cb59aa44f0a8e",
+      "bytes": 2349
+    },
+    {
+      "path": "codex-rs/core/src/agent/host/spawn.rs",
+      "lines": 190,
+      "sha256": "62cfc3d231921b93a4d83327e0a3c29988951a6e574cf37119990679b4e063a5",
+      "bytes": 7036
+    },
+    {
+      "path": "codex-rs/core/src/agent/mod.rs",
+      "lines": 17,
+      "sha256": "e3b22af59076019f3893d3c0e51cdeeec584bbbfe4e9a0a5db0d7dda6fd2821a",
+      "bytes": 505
+    },
+    {
+      "path": "codex-rs/core/src/agent/registry.rs",
+      "lines": 411,
+      "sha256": "fcec6b4cf0eab66b01e5bca8168a3bedf15238a3edd2937c6af448807703a093",
+      "bytes": 14082
+    },
+    {
+      "path": "codex-rs/core/src/agent/status.rs",
+      "lines": 31,
+      "sha256": "11dd75269d0cf2bd35697975c2878db28fb70e7584842a0d4aea198f7bd77d32",
+      "bytes": 1286
+    },
+    {
+      "path": "codex-rs/core/src/agent/types.rs",
+      "lines": 101,
+      "sha256": "ed96dcad3f0bdae6b10f6c522e2cb84db29f4379c7e45452fea5602e797de523",
+      "bytes": 3571
+    },
+    {
+      "path": "codex-rs/core/src/agent_communication.rs",
+      "lines": 189,
+      "sha256": "48b11a61327d6005d0bba0f3452505d65921ce4ba7f07cba424375db499b5992",
+      "bytes": 5577
+    },
+    {
+      "path": "codex-rs/core/src/codex_thread.rs",
+      "lines": 1525,
+      "sha256": "e46d5ff9501d63c4f00ae7799bf19c93d903cd5dddbe012cb42d77a099c1dfb7",
+      "bytes": 60014
+    },
+    {
+      "path": "codex-rs/core/src/config/mod.rs",
+      "lines": 5320,
+      "sha256": "dda20d5d0a34cacf97910f0b279d10b136cddcad36ac3692cfeddac390ca60c8",
+      "bytes": 221061
+    },
+    {
+      "path": "codex-rs/core/src/rollout_budget.rs",
+      "lines": 122,
+      "sha256": "223a573c35088799879688d0aea54f86bdd4420017b95861596a073ac3678380",
+      "bytes": 4106
+    },
+    {
+      "path": "codex-rs/core/src/session/handlers.rs",
+      "lines": 927,
+      "sha256": "aeb2ea64830f88f6a460a00945b466949d3da846b11038b862a3de92a30835e2",
+      "bytes": 35056
+    },
+    {
+      "path": "codex-rs/core/src/session/input_queue.rs",
+      "lines": 900,
+      "sha256": "3e30c1c8ee458afefd48f94bfce5dd52aaed0716f834c5f3e17b2383d8ae01d0",
+      "bytes": 32926
+    },
+    {
+      "path": "codex-rs/core/src/session/mod.rs",
+      "lines": 6193,
+      "sha256": "0777e54dcd4d2db1708dfd0836911f2a67af4b2853311dd2b3a934866cea32a9",
+      "bytes": 253966
+    },
+    {
+      "path": "codex-rs/core/src/session/multi_agents.rs",
+      "lines": 138,
+      "sha256": "7962844076742d8087f86efef1cacf60b9f01d211c08d53e02030173309351dc",
+      "bytes": 5555
+    },
+    {
+      "path": "codex-rs/core/src/session/session.rs",
+      "lines": 2276,
+      "sha256": "c8f54e862b2455dba40ce72f7348bf4594e268b2ab30401ffccb4b33ade508e4",
+      "bytes": 109388
+    },
+    {
+      "path": "codex-rs/core/src/session/turn.rs",
+      "lines": 3847,
+      "sha256": "2748dfcc3d265fba2898088ded0c060dc0182d05412ecb08ac8730e7d0c4c0ad",
+      "bytes": 155349
+    },
+    {
+      "path": "codex-rs/core/src/session_prefix.rs",
+      "lines": 69,
+      "sha256": "55fbadc012f15a58b4b8e34fa2c132c553f60d844e877182ecbe13ecf51404b6",
+      "bytes": 2780
+    },
+    {
+      "path": "codex-rs/core/src/state/turn.rs",
+      "lines": 322,
+      "sha256": "6f6e136b719940413e51389f5d5e24c9eadc7b8dc15049a26c5a6e1899b9078f",
+      "bytes": 11414
+    },
+    {
+      "path": "codex-rs/core/src/stream_events_utils.rs",
+      "lines": 642,
+      "sha256": "612e1d8f73245f67ae8b8479c37128bf172951952d934b6cb4bc38342d7ae807",
+      "bytes": 22624
+    },
+    {
+      "path": "codex-rs/core/src/tasks/admission.rs",
+      "lines": 134,
+      "sha256": "e6b630999cb4b2044aef758cd46c7defcd7d27bffc6833e09e8fcab37001d1bc",
+      "bytes": 4930
+    },
+    {
+      "path": "codex-rs/core/src/tasks/lifecycle.rs",
+      "lines": 126,
+      "sha256": "45c246c98a56e4d262f62058672586aa9a40a55acd3c3c79a940f36e9ce845f6",
+      "bytes": 4890
+    },
+    {
+      "path": "codex-rs/core/src/tasks/mod.rs",
+      "lines": 1189,
+      "sha256": "5699b351bbf0e73c8167d1ec759f74c7320eba1fc1fe6c85e4633ef4bf8153e5",
+      "bytes": 45696
+    },
+    {
+      "path": "codex-rs/core/src/thread_input.rs",
+      "lines": 64,
+      "sha256": "d597c5fdbf946e5e41cd0157de8462403c06fc4e06333d6d3393bfc5ea3093b2",
+      "bytes": 1964
+    },
+    {
+      "path": "codex-rs/core/src/thread_manager/shutdown.rs",
+      "lines": 171,
+      "sha256": "9cc938d0f4c55e40d954a1e7b793e3fad19321b48983f0966420c47ef06afdbe",
+      "bytes": 7010
+    },
+    {
+      "path": "codex-rs/core/src/thread_manager.rs",
+      "lines": 3294,
+      "sha256": "c979b658d53a57c4d4dc94adbc61d0e4b26aaaa2612257e42978418a9d381f80",
+      "bytes": 131131
+    },
+    {
+      "path": "codex-rs/core/src/thread_spawn.rs",
+      "lines": 216,
+      "sha256": "cf690afbd4ce2bcc343ad1edbb712baab3b3bc01ab0c6f5670947275c0d407f3",
+      "bytes": 7707
+    },
+    {
+      "path": "codex-rs/core/src/tools/handlers/multi_agents_spec.rs",
+      "lines": 931,
+      "sha256": "e24132911b9da01e84691dd8e3ae1179f8b9a53b6653adc703dee2250abc9d0b",
+      "bytes": 37769
+    },
+    {
+      "path": "codex-rs/core/src/tools/handlers/multi_agents_tests.rs",
+      "lines": 4778,
+      "sha256": "fbc2fd364e4e42eb84793bf432a95e634861a7495d793379f519393a222dac9d",
+      "bytes": 166744
+    },
+    {
+      "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/followup_task.rs",
+      "lines": 57,
+      "sha256": "d6b3542f063401a614fcda05fd598be22477dfabee6a26e7fac6e09b4976b8c2",
+      "bytes": 1722
+    },
+    {
+      "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/interrupt_agent.rs",
+      "lines": 112,
+      "sha256": "634687e8d0616e71c43fa736ad4fcb4bbbc73018186322d6aa29e37736d5b877",
+      "bytes": 3335
+    },
+    {
+      "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/message_tool.rs",
+      "lines": 101,
+      "sha256": "bcd9b05f785196f211f7e36a072b99c6ec7c332702b677d6ba64f12a675cd27f",
+      "bytes": 3557
+    },
+    {
+      "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/send_message.rs",
+      "lines": 57,
+      "sha256": "4c45adff32a96519dfaa3ff36c02ddc9ce300bfe0f9039b449f2ac9dd30f3e86",
+      "bytes": 1714
+    },
+    {
+      "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs",
+      "lines": 270,
+      "sha256": "440d1558ccd53dcf49ae08979a35cb44db5e8c55a7068b5cb00ac5add20a4504",
+      "bytes": 8702
+    },
+    {
+      "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/wait.rs",
+      "lines": 192,
+      "sha256": "a38f1d9ada718c09fa9d821cfc017e456a8363297e6757a120ee69de66c5803a",
+      "bytes": 6415
+    },
+    {
+      "path": "codex-rs/core/src/tools/handlers/multi_agents_v2.rs",
+      "lines": 67,
+      "sha256": "ae414817a043502f54d313c03b1144d5c57fbbe6e69082c2295d99a636489b8a",
+      "bytes": 2321
+    },
+    {
+      "path": "codex-rs/core/src/tools/multi_agent_tool.rs",
+      "lines": 134,
+      "sha256": "c40990e47c77de001040ff36936260dec02c8bda8d169e2c231d8ab9a36a9282",
+      "bytes": 4917
+    },
+    {
+      "path": "codex-rs/core/src/tools/spec_plan.rs",
+      "lines": 1761,
+      "sha256": "ebe63d4445f56f3c5b0cad03160dfc453f20d6c1908a31e46026cbbadd0a9ca1",
+      "bytes": 68782
+    },
+    {
+      "path": "codex-rs/core/tests/suite/pending_input.rs",
+      "lines": 3139,
+      "sha256": "ff821ee75b311da2bc1eb41f3b044934c4b71828b2d46e3b3f7bd8e7235c5136",
+      "bytes": 114672
+    },
+    {
+      "path": "codex-rs/features/src/feature_configs.rs",
+      "lines": 625,
+      "sha256": "cc09368ac6b2413fd6b26c17cdcab7eb031b52eaa088eb4f6bc698f143d00fb3",
+      "bytes": 26533
+    },
+    {
+      "path": "codex-rs/features/src/lib.rs",
+      "lines": 2501,
+      "sha256": "c752a309ae95352a7bc10b4d7acf6d1aa617526a63c2d8670443a105990a17d5",
+      "bytes": 86880
+    },
+    {
+      "path": "codex-rs/prompts/src/multi_agent_instructions.rs",
+      "lines": 99,
+      "sha256": "461e2a419203922e8f497dd089031a0b22c3f72e2d13f1d35f96fef01e2aa162",
+      "bytes": 4582
+    }
+  ]
+}

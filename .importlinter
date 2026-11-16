@@ -86,3 +86,19 @@ forbidden_modules =
     pleiad.runtime
     pleiad_weave.application
     pleiad_weave.api
+
+[importlinter:runtime_does_not_depend_on_collaboration]
+name = Runtime lifecycle hooks stay independent from collaboration
+type = forbidden
+source_modules =
+    pleiad.runtime
+forbidden_modules =
+    pleiad.orchestration.collaboration
+
+[importlinter:collaboration_is_an_independent_mode]
+name = Collaboration does not adapt the scoped SubagentGroup
+type = forbidden
+source_modules =
+    pleiad.orchestration.collaboration
+forbidden_modules =
+    pleiad.orchestration.subagents

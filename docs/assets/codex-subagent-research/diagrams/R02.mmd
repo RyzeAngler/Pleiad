@@ -1,0 +1,22 @@
+sequenceDiagram
+    participant M as 父模型
+    participant H as Spawn handler
+    participant C as LocalAgentControl
+    participant G as Registry / GraphStore
+    participant T as ThreadManager / Session
+    participant W as 子 RegularTask
+    M->>H: spawn_agent(task_name, message, fork_turns)
+    H->>H: 校验参数、构造父上下文与配置
+    H->>C: spawn(可信 SpawnRequest)
+    C->>C: 树准入、执行容量与驻留容量检查
+    C->>G: 预留路径 / 身份
+    C->>C: 构造选定父历史快照
+    C->>G: 先持久化 parent-child Open 关系
+    C->>T: 用预留 thread_id 创建独立 Session
+    C->>T: 提交初始任务 trigger_turn=true
+    T->>W: 准入后执行模型与工具
+    C->>G: commit 注册与驻留预留
+    C->>C: 解除 PendingSpawn 临时清理责任
+    C-->>H: LiveAgent + 有效配置
+    H-->>M: canonical task_name / 可选 nickname
+    Note over M,W: 返回不等待子任务完成；子任务可能已开始

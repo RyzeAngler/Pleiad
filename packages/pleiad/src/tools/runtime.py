@@ -5,6 +5,7 @@ from jsonschema import Draft202012Validator, SchemaError, ValidationError
 
 from pleiad.contracts import JsonObject
 from pleiad.errors.base import BusinessError, SystemFault
+from pleiad.limits import seconds_remaining
 from pleiad.schemas import validate_json_schema
 from pleiad.tools.base import BackgroundAdmission, BaseTool, ToolFailure
 from pleiad.tools.contracts import ToolCall, ToolContext, ToolResult
@@ -47,7 +48,7 @@ class ToolRuntime:
         response: InterruptionResponse,
         context: ToolContext,
         *,
-        deadline: datetime,
+        deadline: datetime | None,
     ) -> ToolExecutionOutcome | None:
         """Resume a pending Tool under its concurrency slot and Run deadline.
 
@@ -68,8 +69,8 @@ class ToolRuntime:
         missing = set(tool.required_permissions) - set(context.grants.capabilities)
         if missing:
             raise ValueError("Current Tool context no longer grants the pending Tool permissions")
-        remaining = (deadline - datetime.now(UTC)).total_seconds()
-        if remaining <= 0:
+        remaining = seconds_remaining(deadline)
+        if remaining is not None and remaining <= 0:
             return None
         if interruption.phase == "authorization":
             if not response.result.ok:
@@ -93,7 +94,9 @@ class ToolRuntime:
                 if not authorization_timeout.expired():
                     raise
                 return None
-        timeout = asyncio.timeout(min(remaining, tool.policy.timeout_seconds))
+        timeout = asyncio.timeout(
+            tool.policy.timeout_seconds if remaining is None else min(remaining, tool.policy.timeout_seconds)
+        )
         try:
             async with timeout, self.semaphore(tool):
                 outcome = await tool.resume_interruption(context, interruption, response)

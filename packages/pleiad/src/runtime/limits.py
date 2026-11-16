@@ -9,10 +9,11 @@ class RunLimits(ContractModel):
 
     model_config = ConfigDict(strict=True)
 
-    execution_timeout_seconds: float = Field(default=600.0, gt=0, allow_inf_nan=False)
+    execution_timeout_seconds: float | None = Field(default=600.0, gt=0, allow_inf_nan=False)
     deadline: AwareDatetime | None = None
-    max_model_steps: int = Field(default=32, gt=0)
-    max_output_tokens: int = Field(default=8_192, gt=0)
+    max_model_steps: int | None = Field(default=32, gt=0)
+    max_output_tokens: int | None = Field(default=8_192, gt=0)
+    max_response_output_tokens: int = Field(default=8_192, gt=0)
     tool_concurrency: int = Field(default=8, gt=0)
     max_handoffs: int = Field(default=8, gt=0)
     context_budget: ContextBudget = ContextBudget(

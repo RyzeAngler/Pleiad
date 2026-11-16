@@ -1,0 +1,9 @@
+flowchart LR
+    P["父 Session"] --> FL["flush + 一致历史快照"]
+    FL --> CLEAN["分叉处理<br/>来源标记、身份、压缩边界"]
+    CLEAN --> HIST["子独立历史"]
+    STEP["发起 spawn 的 Step 设置"] --> CONF["子配置 + 当前权限约束"]
+    ROLE["宿主角色配置"] --> CONF
+    HIST --> CHILD["新 ThreadId / Session"]
+    CONF --> CHILD
+    LIVE["父 task / 工具进程 handle<br/>一次性审批 / 累计用量"] -.不作为子运行资源复制.-> BLOCK["独立生命周期"]

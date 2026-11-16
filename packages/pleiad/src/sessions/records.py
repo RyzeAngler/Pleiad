@@ -50,7 +50,7 @@ class ModelAttemptRecord(ContractModel):
     model: str = Field(min_length=1, max_length=256)
     request_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     max_output_tokens: int = Field(gt=0)
-    deadline: AwareDatetime
+    deadline: AwareDatetime | None
     usage_before: RunUsage
     admitted_at: AwareDatetime
     result_usage: ModelUsage | None = None
@@ -64,7 +64,7 @@ class ModelAttemptRecord(ContractModel):
             raise ValueError("Model completion requires both reported usage and its recorded time")
         if self.response_id is not None and self.completed_at is None:
             raise ValueError("A model response identity requires a completed attempt")
-        if self.admitted_at >= self.deadline:
+        if self.deadline is not None and self.admitted_at >= self.deadline:
             raise ValueError("A model attempt must be admitted before its authorization expires")
         if self.completed_at is not None and self.completed_at < self.admitted_at:
             raise ValueError("A model completion cannot precede its admission")

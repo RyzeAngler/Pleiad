@@ -1,0 +1,18 @@
+flowchart TB
+    Product["pleiad_weave / Canvas"] --> Collab["orchestration.collaboration"]
+    Product --> Public["SDK 公共 Agent / Session / Runner"]
+    Collab --> Runtime["runtime"]
+    Collab --> Agent["agent"]
+    Collab --> Sessions["sessions"]
+    Collab --> Tools["tools"]
+    Collab --> Budgets["budgets"]
+    Collab --> Events["events / contracts"]
+    Runtime --> Agent
+    Runtime --> Sessions
+    Runtime --> Tools
+    Runtime --> Budgets
+    Runtime --> Models["models / messages / context"]
+    Sessions --> Events
+    Tools --> Events
+    Tools --> Budgets
+    Budgets --> Core["contracts + 已有工具限额契约"]

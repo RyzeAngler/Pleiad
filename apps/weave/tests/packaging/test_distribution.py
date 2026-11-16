@@ -53,7 +53,7 @@ def test_distributions_install_without_the_checkout_and_ship_only_product_resour
         assert "pleiad/models/providers/volcengine.py" in names
         sdk_metadata_path = next(name for name in names if name.endswith(".dist-info/METADATA"))
         sdk_metadata = Parser().parsestr(archive.read(sdk_metadata_path).decode("utf-8"))
-        assert sdk_metadata["Version"] == "0.2.0"
+        assert sdk_metadata["Version"] == "0.3.0"
         assert "volcengine" in sdk_metadata.get_all("Provides-Extra", [])
         volcengine_dependencies = {
             requirement.name
@@ -70,6 +70,8 @@ def test_distributions_install_without_the_checkout_and_ship_only_product_resour
         assert not any(name.startswith("pleiad/orchestration/supervisor/") for name in names)
         assert "pleiad/budgets.py" in names
         assert "pleiad/orchestration/budget.py" in names
+        for module in ("group", "endpoint", "binding", "contracts", "state", "store", "tools", "backends/sqlite"):
+            assert f"pleiad/orchestration/collaboration/{module}.py" in names
         assert "pleiad/tools/builtins/read_tool_result.py" not in names
     with zipfile.ZipFile(app) as archive:
         names = archive.namelist()
@@ -82,8 +84,8 @@ def test_distributions_install_without_the_checkout_and_ship_only_product_resour
         ]
         assert sdk_requirements
         for requirement in sdk_requirements:
-            assert Version("0.2.0") in requirement.specifier
-            assert Version("0.1.2") not in requirement.specifier
+            assert Version("0.3.0") in requirement.specifier
+            assert Version("0.2.0") not in requirement.specifier
         assert "pleiad_weave/agent/graph.py" in names
         assert "pleiad_weave/capabilities/approval.py" in names
         assert "pleiad_weave/memory_cli.py" in names
@@ -123,6 +125,17 @@ def test_distributions_install_without_the_checkout_and_ship_only_product_resour
         capture_output=True,
         text=True,
     )
+    demonstration = subprocess.run(  # noqa: S603 - Run checked-in offline example against the clean installation.
+        (str(python), "-c", (repository / "packages/pleiad/examples/collaboration.py").read_text()),
+        check=True,
+        timeout=30,
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+    assert "Root: succeeded" in demonstration.stdout
+    assert demonstration.stdout.count(": terminal, Run ") == 3
     script = """
 import importlib.util
 import asyncio
@@ -152,7 +165,7 @@ from pleiad_weave.application.service import ExecutionService
 from pleiad_weave.infrastructure.bootstrap import create_application
 from pleiad_weave.infrastructure.sandbox.images import bundled_python_image_definition
 validate_json_schema({"type": "object"})
-assert __version__ == "0.2.0"
+assert __version__ == "0.3.0"
 image = ImageBlock(image=ImageReference(
     reference="asset:installed", sha256="a" * 64, mime="image/png", width=1, height=1,
 ))

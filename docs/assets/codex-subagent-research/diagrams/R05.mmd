@@ -1,0 +1,13 @@
+sequenceDiagram
+    participant W as 子 turn
+    participant C as AgentControl completion
+    participant Q as 父 InputQueue
+    participant WAIT as 父 wait_agent
+    participant R as 父模型循环
+    WAIT->>Q: 订阅活动 + 检查既有 pending
+    W->>C: 终态 AgentTurnOutcome
+    C->>Q: 结果消息 trigger_turn=false
+    Q-->>WAIT: 输入活动通知
+    WAIT-->>R: Wait completed，不携带正文
+    R->>Q: 下次合法输入边界取消息
+    Q-->>R: 子成员结果及来源

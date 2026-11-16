@@ -137,9 +137,8 @@ class ContextCompactor:
             else:
                 break
         retained = tuple(step for step in steps if step.sequence in selected_sequences)
-        # A summary cursor covers a contiguous prefix and must never cross a retained image step.
-        first_retained = retained[0].sequence if retained else None
-        older = tuple(step for step in steps if first_retained is None or step.sequence < first_retained)
+        # Pinned image steps stay visible while every omitted complete step enters the summary.
+        older = tuple(step for step in steps if step.sequence not in selected_sequences)
         return retained, older
 
     def check(

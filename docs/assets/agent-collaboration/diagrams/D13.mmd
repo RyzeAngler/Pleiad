@@ -1,0 +1,28 @@
+sequenceDiagram
+    participant H as 新宿主 Owner
+    participant C as 协作数据库
+    participant S as SessionStore
+    participant R as Runner.reconcile
+    participant P as 宿主外部操作核对
+    H->>H: 确保旧进程已停止 / 独占部署权
+    H->>C: 核对并提升 owner_epoch，关闭新工作准入
+    H->>C: 读取未结算工作、预留、outbox与投影水位
+    loop 每个未结算工作
+      H->>S: run_for_invocation(稳定ID)
+      alt 已有终态receipt
+        S-->>H: 真实结果与用量
+        H->>C: 幂等补记终态 / 结果投递 / 费用
+      else 存在未结算Run
+        H->>P: 可用时取得原外部动作证据
+        P-->>H: 证据或unknown
+        H->>R: reconcile(原Run, epoch, revision, evidence)
+        R->>S: fencing和事实结算
+        R-->>H: terminal / paused / interrupted
+        H->>C: 保存对应状态，不自动重提
+      else 确认不存在Run
+        H->>C: 标记未执行 / 释放已证明未使用额度
+      end
+    end
+    H->>S: 核对已投递输入和已消费step
+    H->>C: 补投递通知 / 补事件水位
+    H-->>H: 输出RecoveryReport；按当前授权开启新工作

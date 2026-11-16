@@ -1,0 +1,20 @@
+sequenceDiagram
+    participant A as 调用成员
+    participant C as AgentControl
+    participant Q as 目标 InputQueue
+    participant S as 目标 Session / Scheduler
+    participant R as 目标 RegularTask
+    A->>C: send_message / followup_task
+    C->>C: 解析目标、检查身份、必要时 reload
+    C->>Q: 消息 + trigger_turn
+    Q-->>Q: 发布输入活动通知
+    alt 目标有活跃且可接收的 turn
+      R->>Q: 在合法边界取待处理输入
+      Q-->>R: 当前 turn 的后续模型输入
+    else 空闲且 trigger_turn=true
+      S->>S: 预留唯一 active turn
+      S->>Q: 按序取邮箱输入和来源信息
+      S->>R: 启动新 turn
+    else 纯消息且无额外唤醒条件
+      Note over Q,S: 保留消息，等待下一次真实任务
+    end

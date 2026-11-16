@@ -84,8 +84,8 @@ The host injects an asynchronous resolver into `Runner`. Every request, includin
 a text-only follow-up or resumed Run, authorizes retained images again and checks
 their SHA-256, metadata and physical limits before model admission.
 
-These APIs are included in Pleiad 0.2.0. Install `pleiad[models]==0.2.0`
-for all model adapters, or `pleiad[volcengine]==0.2.0` for Ark. For a source checkout, run
+These APIs were introduced in Pleiad 0.2.0. Install `pleiad[models]==0.3.0`
+for all model adapters, or `pleiad[volcengine]==0.3.0` for Ark. For a source checkout, run
 `uv sync --project packages/pleiad --locked --all-groups --all-extras` from the
 repository root, then use `uv run --project packages/pleiad --frozen python`.
 The following example uses a known one-pixel PNG. Set
@@ -507,6 +507,15 @@ The first invocation binds its `ToolContext.run_id` for the group's lifetime.
 controls. Independent product Workers are composed by the host using durable
 product jobs and their own Sessions.
 
+Pleiad 0.3.0 adds `CollaborationGroup` from
+`pleiad.orchestration.collaboration.group`. Members retain their identity and
+Session across work rounds. Member endpoints expose spawn, message, follow-up,
+wait, interrupt, and close operations. Host callbacks authorize and bind each
+work item to the existing Runner. In-memory and SQLite stores retain ordered
+collaboration facts for recovery under exclusive host ownership. All composed
+orchestration modes share the same `BudgetLedger`. The offline
+`examples/collaboration.py` demonstrates the host binding and member lifecycle.
+
 Graph `Node` bindings use `session_store`, `runner`, `agent`, and `limits`.
 `GraphExecutor.execute` receives the invoking `ToolContext`, reserves disjoint
 child allowances, and intersects parent grants, deadlines, and concurrency.
@@ -631,10 +640,16 @@ measurement and settles that attempt once. An expired authorization never
 enters the provider or creates a charged attempt.
 
 `BudgetLedger`, `BudgetState`, and `BudgetCheckpoint` are imported from
-`pleiad.budgets`. Graph and SubagentGroup share that ledger with the parent
-Runtime. Active child reservations also reduce parent model admission. A parent
-can wait for an active child to settle before deciding that allowance is
-exhausted. Provider-reported overage remains charged at its actual amount.
+`pleiad.budgets`. Graph, SubagentGroup, and CollaborationGroup share that ledger
+with the parent Runtime. Active child reservations also reduce parent model
+admission. A parent can wait for an active child to settle before deciding that
+allowance is exhausted. Provider-reported overage remains charged at its actual amount.
+
+`RunLimits.execution_timeout_seconds`, `max_model_steps`, and `max_output_tokens`
+accept `None` for an unbounded allowance. Host and parent limits still constrain
+the effective policy. `max_response_output_tokens` bounds each model response
+and defaults to 8,192, including when the cumulative output allowance is
+unbounded. Finite remaining output also constrains that per-response bound.
 
 Host bindings expose the concrete `BaseTool.budget_ledger`. `FunctionTool`
 accepts the same keyword when a bound function executes SDK graph or child

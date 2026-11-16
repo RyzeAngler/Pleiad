@@ -619,7 +619,10 @@ class ExecutionService:
                         input_ids=tuple(value.envelope.input_id for value in pending),
                         input_mode="live",
                         limits=RunLimits(
-                            execution_timeout_seconds=1800, max_model_steps=64, max_output_tokens=available
+                            execution_timeout_seconds=1800,
+                            max_model_steps=64,
+                            max_output_tokens=available,
+                            max_response_output_tokens=available,
                         ),
                         context=binding.context,
                     )
@@ -638,6 +641,7 @@ class ExecutionService:
                             execution_timeout_seconds=1800,
                             max_model_steps=64,
                             max_output_tokens=available + checkpoint.usage.budget_output_tokens,
+                            max_response_output_tokens=available + checkpoint.usage.budget_output_tokens,
                         ),
                     )
             self.handles[execution_id] = handle

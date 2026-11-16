@@ -258,7 +258,9 @@ class GraphExecutor:
             if context.run_id is None:
                 raise GraphSystemFault("Parent Run limits require an explicit Run identity.")
             limits = context.parent_limits
-            deadline = min(limits.deadline, datetime.now(UTC) + timedelta(seconds=timeout_seconds))
+            deadline = datetime.now(UTC) + timedelta(seconds=timeout_seconds)
+            if limits.deadline is not None:
+                deadline = min(limits.deadline, deadline)
             timeout_seconds = (deadline - datetime.now(UTC)).total_seconds()
             if timeout_seconds <= 0:
                 return self.failed_result(graph, GraphTimeoutError(), state)

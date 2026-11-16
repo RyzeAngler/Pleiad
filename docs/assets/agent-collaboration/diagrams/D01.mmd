@@ -1,0 +1,8 @@
+flowchart LR
+    User["用户 / 运维人员"] -->|任务与控制| Host["宿主 Agent 应用<br/>Canvas 或 Weave"]
+    Host -->|模型请求| Models["外部模型 / 图片服务"]
+    Host -->|授权工具调用| Tools["工具 / MCP / 沙箱"]
+    Host -->|读取与保存| Assets["宿主资产与产品存储"]
+    Host -->|进度与结果| User
+    Policy["宿主授权与配置"] -->|能力和额度| Host
+    Note["Pleiad 是 Host 内部 SDK<br/>不是独立网络服务"] -.-> Host

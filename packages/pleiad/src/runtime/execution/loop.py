@@ -42,6 +42,7 @@ from pleiad.events.runtime import (
     ToolInterruptedEvent,
     ToolStartedEvent,
 )
+from pleiad.limits import exhausted, expired, remaining, seconds_remaining
 from pleiad.logging.context import bind_log_context
 from pleiad.messages.images import ImageBlock, ImageLimits, ImageReadScope, ImageResolver, ResolvedImage, resolve_images
 from pleiad.messages.message import AssistantMessage, ToolMessage, UserMessage
@@ -151,22 +152,22 @@ class AgentLoop:
         step_scope: AbstractContextManager[Span] | None = None
         step_span: Span | None = None
         try:
-            remaining_seconds = max(0.0, (policy.deadline - datetime.now(UTC)).total_seconds())
+            remaining_seconds = seconds_remaining(policy.deadline)
             timeout = asyncio.timeout(remaining_seconds)
             async with timeout:
                 while True:
-                    if policy.deadline <= datetime.now(UTC):
+                    if expired(policy.deadline):
                         await memory.abort(current_step_id)
                         return LoopOutcome(LoopStatus.TIMED_OUT, usage=current_usage)
                     current_usage, remaining_steps, remaining_output_tokens = control.admission(
                         run_id, current_usage, policy
                     )
-                    if remaining_steps <= 0 or remaining_output_tokens <= 0:
+                    if exhausted(remaining_steps) or exhausted(remaining_output_tokens):
                         await control.wait_children(run_id)
                         current_usage, remaining_steps, remaining_output_tokens = control.admission(
                             run_id, current_usage, policy
                         )
-                    if remaining_steps <= 0 or remaining_output_tokens <= 0:
+                    if exhausted(remaining_steps) or exhausted(remaining_output_tokens):
                         await memory.abort(current_step_id)
                         return LoopOutcome(LoopStatus.LIMIT_REACHED, usage=current_usage)
                     if step_scope is not None and step_span is not None:
@@ -183,7 +184,7 @@ class AgentLoop:
                         observation_type="span",
                     )
                     step_span = step_scope.__enter__()
-                    if current_usage.total_model_calls >= policy.max_model_steps:
+                    if exhausted(remaining(policy.max_model_steps, current_usage.total_model_calls)):
                         await memory.abort(current_step_id)
                         return LoopOutcome(LoopStatus.LIMIT_REACHED, usage=current_usage)
                     active_step = await memory.active()
@@ -303,7 +304,9 @@ class AgentLoop:
                         instructions=request_instructions,
                         messages=request_messages,
                         tools=model_tools,
-                        max_output_tokens=output_token_limit(remaining_output_tokens, agent),
+                        max_output_tokens=output_token_limit(
+                            remaining_output_tokens, agent, policy.max_response_output_tokens
+                        ),
                         output_schema=agent.output_schema,
                         resolved_images=resolved_images,
                     )
@@ -443,7 +446,11 @@ class AgentLoop:
                             ModelStepCompletedEvent(run_id=run_id, step_id=current_step_id, agent_name=agent.name),
                             event_sink,
                         )
-                        if operations.running or await operations.ready_inputs():
+                        if (
+                            operations.running
+                            or await operations.ready_inputs(include_external=not control.has_input_gate)
+                            or await control.before_finish(run_id)
+                        ):
                             if operations.running:
                                 await operations.wait()
                             next_step = await memory.begin(agent.name, consume_inputs=not control.pause_requested)
@@ -527,7 +534,7 @@ class AgentLoop:
                             ModelStepCompletedEvent(run_id=run_id, step_id=current_step_id, agent_name=agent.name),
                             event_sink,
                         )
-                        if current_usage.budget_output_tokens >= policy.max_output_tokens:
+                        if exhausted(remaining(policy.max_output_tokens, current_usage.budget_output_tokens)):
                             return LoopOutcome(LoopStatus.LIMIT_REACHED, usage=current_usage)
                         if handoff_binding is None:
                             next_step = await memory.begin(agent.name, consume_inputs=not control.pause_requested)
@@ -560,8 +567,12 @@ class AgentLoop:
                         agent_fingerprint = target.fingerprint
                         if handoff_binding.policy is not None:
                             policy = handoff_binding.policy
-                            remaining_seconds = max(0.0, (policy.deadline - datetime.now(UTC)).total_seconds())
-                            timeout.reschedule(asyncio.get_running_loop().time() + remaining_seconds)
+                            remaining_seconds = seconds_remaining(policy.deadline)
+                            timeout.reschedule(
+                                None
+                                if remaining_seconds is None
+                                else asyncio.get_running_loop().time() + remaining_seconds
+                            )
                         next_step = await memory.begin(agent.name, consume_inputs=not control.pause_requested)
                         current_step_id = next_step.step_id
                         await self.emit(
@@ -607,6 +618,7 @@ class AgentLoop:
                             context_budget=compactor.budget.budget,
                             max_model_steps=policy.max_model_steps,
                             max_output_tokens=policy.max_output_tokens,
+                            max_response_output_tokens=policy.max_response_output_tokens,
                             tool_concurrency=policy.tool_concurrency,
                             max_handoffs=current_max_handoffs,
                             grants=policy.grants,
@@ -632,9 +644,8 @@ class AgentLoop:
                         ModelStepCompletedEvent(run_id=run_id, step_id=current_step_id, agent_name=agent.name),
                         event_sink,
                     )
-                    if (
-                        current_usage.total_model_calls >= policy.max_model_steps
-                        or current_usage.budget_output_tokens >= policy.max_output_tokens
+                    if exhausted(remaining(policy.max_model_steps, current_usage.total_model_calls)) or exhausted(
+                        remaining(policy.max_output_tokens, current_usage.budget_output_tokens)
                     ):
                         return LoopOutcome(LoopStatus.LIMIT_REACHED, usage=current_usage)
                     next_step = await memory.begin(agent.name, consume_inputs=not control.pause_requested)
@@ -676,7 +687,7 @@ class AgentLoop:
         agent_name: str,
         model_span: Span,
         model_started: float,
-        deadline: datetime,
+        deadline: datetime | None,
     ) -> ModelResult:
         """Consume one model stream and publish only safe lifecycle metadata."""
         model_result: ModelResult | None = None
@@ -740,7 +751,7 @@ class AgentLoop:
                 elif event.kind is ModelStreamEventKind.COMPLETED:
                     model_result = event.result
         except asyncio.CancelledError:
-            abort_reason = "timed_out" if datetime.now(UTC) >= deadline else "cancelled"
+            abort_reason = "timed_out" if expired(deadline) else "cancelled"
             await self.emit(
                 MessageAbortedEvent(
                     run_id=run_id,
@@ -833,9 +844,10 @@ class AgentLoop:
                     event_sink=event_sink,
                     run_id=run_id,
                     parent_run_id=parent_run_id,
-                    parent_deadline=policy.deadline.isoformat(),
-                    parent_remaining_model_steps=max(0, policy.max_model_steps - current.total_model_calls),
-                    parent_remaining_output_tokens=max(0, policy.max_output_tokens - current.budget_output_tokens),
+                    parent_deadline=None if policy.deadline is None else policy.deadline.isoformat(),
+                    parent_max_response_output_tokens=policy.max_response_output_tokens,
+                    parent_remaining_model_steps=remaining(policy.max_model_steps, current.total_model_calls),
+                    parent_remaining_output_tokens=remaining(policy.max_output_tokens, current.budget_output_tokens),
                     parent_tool_concurrency=policy.tool_concurrency,
                     parent_child_model_calls=current.child_model_calls,
                     parent_child_budget_output_tokens=current.child_budget_output_tokens,
@@ -874,9 +886,10 @@ class AgentLoop:
         event_sink: EventSink | None,
         run_id: str,
         parent_run_id: str | None,
-        parent_deadline: str,
-        parent_remaining_model_steps: int,
-        parent_remaining_output_tokens: int,
+        parent_deadline: str | None,
+        parent_max_response_output_tokens: int = 8_192,
+        parent_remaining_model_steps: int | None,
+        parent_remaining_output_tokens: int | None,
         parent_tool_concurrency: int,
         parent_child_model_calls: int,
         parent_child_budget_output_tokens: int,
@@ -944,7 +957,8 @@ class AgentLoop:
                     step_id=memory_step_id,
                     grants=grants,
                     parent_limits=ParentRunLimits(
-                        deadline=datetime.fromisoformat(parent_deadline),
+                        deadline=None if parent_deadline is None else datetime.fromisoformat(parent_deadline),
+                        max_response_output_tokens=parent_max_response_output_tokens,
                         remaining_model_steps=parent_remaining_model_steps,
                         remaining_output_tokens=parent_remaining_output_tokens,
                         tool_concurrency=parent_tool_concurrency,
@@ -1163,12 +1177,15 @@ async def abort_safely(memory: SessionWriter, reason: str) -> None:
         logger.error(f"memory step cleanup failed reason={reason}", exc_info=True)
 
 
-def output_token_limit(policy_limit: int, agent: Agent) -> int:
+def output_token_limit(policy_limit: int | None, agent: Agent, response_limit: int = 8_192) -> int:
     """Return the tighter Runtime and Agent output limit."""
     agent_limit = agent.policy_hints.max_output_tokens
-    if agent_limit is None:
-        return policy_limit
-    return min(policy_limit, agent_limit)
+    finite = [response_limit]
+    if policy_limit is not None:
+        finite.append(policy_limit)
+    if agent_limit is not None:
+        finite.append(agent_limit)
+    return min(finite)
 
 
 def execution_checkpoint(
@@ -1200,6 +1217,7 @@ def execution_checkpoint(
         deadline=policy.deadline,
         max_model_steps=policy.max_model_steps,
         max_output_tokens=policy.max_output_tokens,
+        max_response_output_tokens=policy.max_response_output_tokens,
         tool_concurrency=policy.tool_concurrency,
         max_handoffs=max_handoffs,
         grants=policy.grants,

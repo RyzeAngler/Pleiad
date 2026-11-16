@@ -1,0 +1,9 @@
+stateDiagram-v2
+    [*] --> Received: 消息事务提交
+    Received --> Delivered: Session幂等enqueue确认
+    Delivered --> Consumed: InputRecord关联step_id
+    Received --> Revoked: close / 授权撤销
+    Delivered --> Retained: 本轮结束但尚未消费
+    Retained --> Consumed: 后续工作按授权选择
+    Consumed --> [*]
+    Revoked --> [*]

@@ -428,7 +428,7 @@ def test_compaction_retains_image_steps() -> None:
     )
 
     assert compacted.messages == (*image_step.messages, *latest.messages)
-    assert compacted.state == CompactionState(summary="omitted=1 previous=none", through_sequence=1)
+    assert compacted.state == CompactionState(summary="omitted=1,3,4 previous=none", through_sequence=4)
 
 
 def test_compaction_prioritizes_images() -> None:
@@ -466,7 +466,7 @@ def test_compaction_rejects_image_overflow() -> None:
         )
 
 
-def test_summary_stops_before_image() -> None:
+def test_summary_covers_text_between_pinned_image_and_recent_steps_after_restoration() -> None:
     async def scenario() -> None:
         image_step = image_tool_step(2)
         steps = (completed_step(1), image_step, completed_step(3), completed_step(4))
@@ -493,7 +493,66 @@ def test_summary_stops_before_image() -> None:
         )
 
         assert following.messages == (*image_step.messages, *completed_step(5).messages)
-        assert following.state == restored_state
-        assert restored_state.through_sequence == 1
+        assert restored_state == CompactionState(summary="omitted=1,3 previous=none", through_sequence=3)
+        assert following.state == CompactionState(
+            summary="omitted=4 previous=omitted=1,3 previous=none", through_sequence=4
+        )
+
+    asyncio.run(scenario())
+
+
+def test_first_image_remains_visible_while_every_intervening_text_step_is_summarized_once() -> None:
+    async def scenario() -> None:
+        image_step = image_tool_step(1)
+        budget = ContextBudget(window_tokens=20, output_reserve=2, compact_at=6, recent_tokens=5)
+        compactor = ContextCompactor(BudgetGuard(budget, MessageCountCounter()))
+        submitted: list[tuple[int, ...]] = []
+
+        async def record_summary(previous: str | None, steps: tuple[ModelStep, ...]) -> str:
+            submitted.append(tuple(step.sequence for step in steps))
+            return await summarize(previous, steps)
+
+        state = None
+        for latest_sequence in (4, 5, 6):
+            steps = (image_step, *(completed_step(sequence) for sequence in range(2, latest_sequence + 1)))
+            result = await compactor.compact(
+                steps,
+                instructions="rules",
+                input_messages=(),
+                tools=(),
+                context_view=ContextView(),
+                prior_state=state,
+                summarizer=record_summary,
+            )
+            assert result.messages == (*image_step.messages, *completed_step(latest_sequence).messages)
+            assert result.state is not None
+            state = CompactionState.model_validate_json(result.state.model_dump_json())
+            assert state.through_sequence == latest_sequence - 1
+        assert submitted == [(2, 3), (4,), (5,)]
+        assert state is not None and state.summary == "omitted=5 previous=omitted=4 previous=omitted=2,3 previous=none"
+
+    asyncio.run(scenario())
+
+
+def test_restored_prefix_summary_adds_previously_omitted_text_beyond_pinned_image() -> None:
+    async def scenario() -> None:
+        image_step = image_tool_step(2)
+        steps = (completed_step(1), image_step, completed_step(3), completed_step(4))
+        budget = ContextBudget(window_tokens=20, output_reserve=2, compact_at=6, recent_tokens=5)
+        prior = CompactionState(summary="first question remains relevant", through_sequence=1)
+        result = await ContextCompactor(BudgetGuard(budget, MessageCountCounter())).compact(
+            steps,
+            instructions="rules",
+            input_messages=(),
+            tools=(),
+            context_view=ContextView(),
+            prior_state=CompactionState.model_validate_json(prior.model_dump_json()),
+            summarizer=summarize,
+        )
+        assert result.messages == (*image_step.messages, *completed_step(4).messages)
+        assert result.state == CompactionState(
+            summary="omitted=3 previous=first question remains relevant",
+            through_sequence=3,
+        )
 
     asyncio.run(scenario())

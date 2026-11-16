@@ -434,7 +434,9 @@ def test_parallel_subagents_share_and_settle_parent_budget(tmp_path: Path) -> No
         async with group:
             first = await group.submit_subagent("first", "task", context)
             second = await group.submit_subagent("second", "task", context)
-            reserved = tuple(sorted(item.model_steps for item in group.budgets.reservations.values()))
+            values = [item.model_steps for item in group.budgets.reservations.values()]
+            assert all(value is not None for value in values)
+            reserved = tuple(sorted(value for value in values if value is not None))
             first_id = first["delegation_id"]
             second_id = second["delegation_id"]
             assert isinstance(first_id, str)
@@ -1220,7 +1222,9 @@ def test_parallel_graph_and_subagent_share_admission_and_charge_each_actual_chil
             await asyncio.wait_for(asyncio.gather(graph_started.wait(), subagent_started.wait()), 3)
             assert len(ledger.reservations) == 2
             assert ledger.pools[handle.run_id].remaining_output_tokens == 5
-            assert sum(value.output_tokens for value in ledger.reservations.values()) == 4
+            tokens = [value.output_tokens for value in ledger.reservations.values()]
+            assert None not in tokens
+            assert sum(value for value in tokens if value is not None) == 4
             release.set()
             result = await handle.result()
         assert isinstance(result, RunResult) and result.state is RunStatus.SUCCEEDED
@@ -1540,3 +1544,78 @@ def test_parent_execution_time_includes_async_child_drain_before_a_safe_pause(
         assert len(parent_model.requests) == 1
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("steps,tokens", [(None, None), (None, 100), (5, None), (5, 100)])
+def test_unbounded_child_reservation_preserves_finite_parent_dimensions_and_recovery(
+    steps: int | None,
+    tokens: int | None,
+) -> None:
+    ledger = BudgetLedger()
+    limits = ParentRunLimits(
+        deadline=None, remaining_model_steps=steps, remaining_output_tokens=tokens, tool_concurrency=2
+    )
+    reservation = ledger.reserve("child", "parent", limits, None, None)
+    assert reservation is not None
+    assert reservation.model_steps == steps and reservation.output_tokens == tokens
+    saved = ledger.checkpoint("parent", ("child",))
+    assert saved is not None
+    restored = BudgetLedger()
+    restored.restore_checkpoint(type(saved).model_validate_json(saved.model_dump_json()))
+    mirrored = BudgetLedger()
+    mirrored.import_snapshot(type(ledger.export()).model_validate_json(ledger.export().model_dump_json()))
+    assert restored.export() == mirrored.export()
+    charge = RunUsage(model_calls=2, budget_output_tokens=30).charge("parent", "child")
+    restored.settle("child", charge)
+    restored.settle("child", charge)
+    final = restored.snapshot("parent")
+    assert final is not None
+    assert final.remaining_model_steps == (None if steps is None else steps - 2)
+    assert final.remaining_output_tokens == (None if tokens is None else tokens - 30)
+    assert final.usage_charges == (charge,)
+
+
+def test_unknown_unbounded_child_keeps_recoverable_reservation_until_actual_usage_is_available() -> None:
+    ledger = BudgetLedger()
+    limits = ParentRunLimits(
+        deadline=None, remaining_model_steps=None, remaining_output_tokens=None, tool_concurrency=2
+    )
+    assert ledger.reserve("unknown-child", "parent", limits, None, None) is not None
+    ledger.settle("unknown-child", None)
+    assert ledger.usage_charges("parent") == ()
+    assert ledger.reservations["unknown-child"].interrupted
+    restored = BudgetLedger()
+    restored.import_snapshot(ledger.export())
+    assert restored.reservations["unknown-child"].model_steps is None
+    charge = RunUsage(model_calls=7, budget_output_tokens=99).charge("parent", "unknown-child")
+    restored.settle("unknown-child", charge)
+    assert restored.usage_charges("parent") == (charge,)
+    final = restored.snapshot("parent")
+    assert final is not None and final.remaining_model_steps is None and final.remaining_output_tokens is None
+
+
+def test_tightening_settled_unbounded_parent_retains_actual_child_charges() -> None:
+    ledger = BudgetLedger()
+    limits = ParentRunLimits(
+        deadline=None, remaining_model_steps=None, remaining_output_tokens=None, tool_concurrency=2
+    )
+    assert ledger.reserve("child", "parent", limits, None, None) is not None
+    charge = RunUsage(model_calls=2, budget_output_tokens=30).charge("parent", "child")
+    ledger.settle("child", charge)
+    finite = limits.model_copy(update={"remaining_model_steps": 5, "remaining_output_tokens": 100})
+    pool = ledger.observe_parent("parent", finite)
+    assert pool.remaining_model_steps == 3 and pool.remaining_output_tokens == 70
+    assert pool.usage_charges == (charge,)
+
+
+def test_tightening_live_unbounded_parent_requires_settling_its_original_children() -> None:
+    ledger = BudgetLedger()
+    limits = ParentRunLimits(
+        deadline=None, remaining_model_steps=None, remaining_output_tokens=None, tool_concurrency=2
+    )
+    assert ledger.reserve("child", "parent", limits, None, None) is not None
+    before = ledger.export()
+    finite = limits.model_copy(update={"remaining_model_steps": 5, "remaining_output_tokens": 100})
+    with pytest.raises(BudgetStateError, match="Settle unbounded child reservations"):
+        ledger.observe_parent("parent", finite)
+    assert ledger.export() == before

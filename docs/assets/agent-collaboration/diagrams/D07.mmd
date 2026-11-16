@@ -1,0 +1,29 @@
+sequenceDiagram
+    actor M as 主模型
+    participant T as ToolRuntime + Endpoint
+    participant G as CollaborationGroup
+    participant C as 协作数据库
+    participant H as 宿主准入
+    participant S as SessionStore
+    participant R as Runner
+    M->>T: spawn(profile, task, request_id)
+    T->>G: 可信 caller + 类型化请求
+    G->>C: 去重并保存准备身份
+    G->>H: admit_work(work_id, proposal)
+    H-->>G: Permit + 当前 WorkBinding
+    G->>G: 预留共享预算 / 校验容量
+    G->>C: 原子保存成员、工作、预留、事件、启动意图
+    G-->>T: accepted(member_id, work_id)
+    T-->>M: 受理回执
+    Note over M,G: 主模型可以继续工作或创建其他成员
+    G->>H: rebind_work，校验当前授权
+    G->>C: 提交 dispatching 和固定 invocation
+    G->>S: 幂等 enqueue(初始输入)
+    G->>R: start(Session, invocation, live, limits)
+    R->>S: 原子取得 writer / 创建 Run
+    R-->>G: RunHandle
+    G->>C: 记录 Run 关联和 started
+    R->>R: 多步模型 / 工具循环
+    R->>S: 提交原始 RunReceipt
+    R-->>G: 已结算 outcome
+    G->>C: 终态、费用、结果引用、父成员消息意图

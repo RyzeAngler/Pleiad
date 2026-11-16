@@ -846,7 +846,12 @@ class WeaveAgents:
             ),
             runner,
             session_store=self.sessions,
-            limits=RunLimits(execution_timeout_seconds=600, max_model_steps=16, max_output_tokens=16_384),
+            limits=RunLimits(
+                execution_timeout_seconds=600,
+                max_model_steps=16,
+                max_output_tokens=16_384,
+                max_response_output_tokens=16_384,
+            ),
         )
         group = SubagentGroup((subagent,), budgets=graph.executor.budgets)
         delegated = (

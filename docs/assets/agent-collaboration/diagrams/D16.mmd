@@ -1,0 +1,13 @@
+flowchart LR
+    Q["架构质量"] --> Correct["正确性"]
+    Correct --> Identity["单writer / 幂等身份 / 终态不可回退"]
+    Q --> Recover["可恢复性"]
+    Recover --> Evidence["先存事实 / 原调用核对 / unknown保留"]
+    Q --> Secure["安全与隔离"]
+    Secure --> Current["每轮授权 / 图片重授权 / scope隔离"]
+    Q --> Bound["资源有界"]
+    Bound --> Limits["并发 / 队列 / 递归 / 费用 / 清理"]
+    Q --> Maintain["可维护性"]
+    Maintain --> Reuse["复用Runner / 单向依赖 / 新旧模式独立"]
+    Q --> Observe["可观察性"]
+    Observe --> Facts["状态来源明确 / 可恢复游标 / 诊断关联"]

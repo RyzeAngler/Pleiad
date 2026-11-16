@@ -1,0 +1,22 @@
+{
+  "date": "2026-11-12",
+  "document": "pleiad-codex-subagent-source-research.md",
+  "sourceSha256": "1d5dd8c4a55dceaf516e199df54993e4309aabf2e6c5fe7e25a74ecacdbc9cdb",
+  "mermaidBlocks": 6,
+  "sourceMatches": 6,
+  "markdownLocalLinks": 12,
+  "htmlLocalLinks": 37,
+  "desktop": {
+    "width": 1440,
+    "svg": 6,
+    "horizontalOverflow": false,
+    "brokenAnchors": 0,
+    "pageErrors": 0
+  },
+  "tablet": {
+    "width": 820,
+    "pageOverflow": false,
+    "svg": 6
+  },
+  "scope": "Document and diagram validation only; no implementation or runtime acceptance tests."
+}

@@ -67,6 +67,7 @@ class ToolScope:
     close: Callable[[str, bool, bool], Awaitable[None]]
     checkpoint: Callable[[str], JsonObject | None]
     restore: Callable[[str, JsonObject], None]
+    before_finish: Callable[[str], Awaitable[bool]] | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,0 +1,20 @@
+stateDiagram-v2
+    direction TB
+    state "终态集合" as Terminal
+    [*] --> Queued: accepted
+    Queued --> Dispatching: 容量与当前授权通过
+    Queued --> Terminal: 取消 / 期限到期 / 撤权
+    Dispatching --> Running: Run已持久接受
+    Dispatching --> Terminal: 准入失败 / 崩溃核对
+    Running --> Paused: 暂停
+    Paused --> Running: 恢复
+    Running --> Stopping: interrupt / owner结束
+    Paused --> Stopping: cancel_paused
+    Running --> Terminal: receipt或不可恢复中断
+    Stopping --> Terminal: 按实际结算事实
+    Terminal --> [*]
+    note right of Terminal
+      succeeded / failed
+      cancelled / interrupted
+      各自终态不可回退
+    end note

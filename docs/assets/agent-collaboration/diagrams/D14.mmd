@@ -1,0 +1,18 @@
+flowchart TB
+    subgraph Machine["单机部署 / 宿主拥有工作区锁"]
+      Client["多个观察客户端"] --> Owner["唯一 Owner 进程<br/>一个事件循环"]
+      subgraph InProcess["Owner 内部"]
+        Group["CollaborationGroup TaskGroup"]
+        Root["根 RunHandle"]
+        Children["子 RunHandle 集合"]
+        Group --> Children
+        Root --> Group
+      end
+      Owner --> InProcess
+      Owner --> Product[("product.sqlite3")]
+      Group --> DB[("collaboration.sqlite3")]
+      Children --> Sessions[("sessions.sqlite3")]
+      Root --> Sessions
+    end
+    Children --> Provider["外部模型 / 工具后端"]
+    Other["其他进程"] -.只读或转发.-> Owner

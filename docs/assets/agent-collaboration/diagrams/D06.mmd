@@ -1,0 +1,55 @@
+erDiagram
+    SCOPE ||--|{ MEMBER : contains
+    SCOPE ||--o{ COMMAND : accepts
+    MEMBER ||--o{ WORK : executes
+    COMMAND ||--o| WORK : submits
+    COMMAND ||--o| MESSAGE : sends
+    MEMBER ||--o{ MESSAGE : receives
+    MESSAGE ||--o| DELIVERY : projects
+    SCOPE ||--o{ EVENT : journals
+    MEMBER {
+      string scope_id PK
+      string member_id PK
+      string session_id UK
+      string parent_member_id
+      string lifecycle
+    }
+    WORK {
+      string work_id PK
+      string invocation_id UK
+      string member_id FK
+      string owner_run_id
+      string run_id
+      string permit_id
+      string reservation_id
+      string phase
+      string outcome_resolution
+    }
+    COMMAND {
+      string scope_id PK
+      string actor_id PK
+      string request_id PK
+      string payload_digest
+      string original_receipt
+    }
+    MESSAGE {
+      string message_id PK
+      string kind
+      string route
+      int member_sequence
+      string source_member_id
+      string target_member_id
+      string target_run_id
+    }
+    DELIVERY {
+      string input_id PK
+      string session_id
+      string run_id
+      string step_id
+    }
+    EVENT {
+      string event_id PK
+      int scope_sequence UK
+      string kind
+      string causation_id
+    }
