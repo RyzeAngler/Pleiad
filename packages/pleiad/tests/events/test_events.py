@@ -1,8 +1,10 @@
 from typing import Literal
 
 import pytest
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
+from pleiad.contracts import JsonObject, JsonValue
+from pleiad.events.context import ContextCompactionLifecycleEvent, ContextCompactionStartedEvent
 from pleiad.events.contracts import Event
 from pleiad.events.graph import GraphEvent, GraphEventKind
 from pleiad.events.message import MessageCompletedEvent, MessageToolCallDeltaEvent
@@ -92,3 +94,100 @@ def test_graph_node_event_requires_node_identity_and_does_not_require_a_run() ->
     assert event.run_id is None
     with pytest.raises(ValidationError, match="node_id"):
         GraphEvent(kind=GraphEventKind.NODE_COMPLETED, graph_id="graph-1", revision=2)
+
+
+def compaction_event_data(kind: str) -> JsonObject:
+    data: JsonObject = {
+        "kind": kind,
+        "compaction_id": "compaction-1",
+        "run_id": "run-1",
+        "step_id": "step-1",
+        "agent_name": "assistant",
+        "parent_run_id": "parent-run",
+        "trigger_reasons": ["compact_at_reached"],
+        "compact_at": 100,
+        "available_tokens": 200,
+        "before": {"input_tokens": 120, "estimated": True, "image_tokens": None, "unestimated_images": 1},
+    }
+    if kind != "context.compaction.started":
+        data.update(
+            duration_ms=12.5,
+            strategies_attempted=["history_trim"],
+            strategies_completed=["history_trim"],
+        )
+    if kind == "context.compaction.completed":
+        data.update(
+            after={"input_tokens": 40, "estimated": True, "image_tokens": None, "unestimated_images": 1},
+            summary=None,
+            retained_steps=[{"step_id": "old-2", "run_id": "old-run", "sequence": 2}],
+            omitted_steps=[{"step_id": "old-1", "run_id": "old-run", "sequence": 1}],
+            retained_context_blocks=[],
+            removed_context_blocks=[],
+            replaced_tool_result_ids=[],
+        )
+    if kind == "context.compaction.failed":
+        data.update(error_code="context.compaction.failed", error_message="The history summary failed.")
+    return data
+
+
+@pytest.mark.parametrize("phase", ["started", "completed", "failed", "cancelled"])
+def test_compaction_events_round_trip_with_attempt_and_request_identity(phase: str) -> None:
+    adapter = TypeAdapter[ContextCompactionLifecycleEvent](ContextCompactionLifecycleEvent)
+    event = adapter.validate_python(compaction_event_data(f"context.compaction.{phase}"))
+    restored = adapter.validate_json(event.model_dump_json())
+
+    assert restored == event
+    assert restored.compaction_id == "compaction-1"
+    assert (restored.run_id, restored.step_id, restored.agent_name) == ("run-1", "step-1", "assistant")
+    assert restored.parent_run_id == "parent-run"
+    assert restored.before.estimated and restored.before.image_tokens is None
+    assert restored.before.unestimated_images == 1
+
+
+@pytest.mark.parametrize("missing", ["compaction_id", "run_id", "step_id", "agent_name", "before"])
+def test_compaction_started_rejects_missing_attempt_or_request_facts(missing: str) -> None:
+    data = compaction_event_data("context.compaction.started")
+    data.pop(missing)
+
+    with pytest.raises(ValidationError, match=missing):
+        ContextCompactionStartedEvent.model_validate(data)
+
+
+@pytest.mark.parametrize("missing", ["error_code", "error_message"])
+def test_compaction_failure_requires_public_error_details(missing: str) -> None:
+    data = compaction_event_data("context.compaction.failed")
+    data.pop(missing)
+
+    with pytest.raises(ValidationError, match=missing):
+        TypeAdapter(ContextCompactionLifecycleEvent).validate_python(data)
+
+
+@pytest.mark.parametrize(
+    "attempted,completed",
+    [
+        (["history_trim", "history_trim"], ["history_trim"]),
+        (["history_trim"], ["history_trim", "history_trim"]),
+        (["history_trim"], ["rolling_summary"]),
+    ],
+)
+def test_compaction_terminal_rejects_repeated_or_unattempted_strategy_stages(
+    attempted: list[JsonValue], completed: list[JsonValue]
+) -> None:
+    data = compaction_event_data("context.compaction.cancelled")
+    data["strategies_attempted"] = attempted
+    data["strategies_completed"] = completed
+
+    with pytest.raises(ValidationError, match="strategies"):
+        TypeAdapter(ContextCompactionLifecycleEvent).validate_python(data)
+
+
+@pytest.mark.parametrize("kind", [None, "context.compaction.unknown"])
+def test_compaction_event_union_rejects_missing_or_unknown_lifecycle_kind(kind: str | None) -> None:
+    data = compaction_event_data("context.compaction.started")
+    if kind is None:
+        data.pop("kind")
+    else:
+        data["kind"] = kind
+
+    with pytest.raises(ValidationError, match="kind"):
+        TypeAdapter(ContextCompactionLifecycleEvent).validate_python(data)

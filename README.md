@@ -221,7 +221,7 @@ apps/weave/src/      # 安装后的 Python 包名：pleiad_weave
 
 ## 开发与验证
 
-SDK 与 App 是独立 Python 项目，各自在自己的目录维护依赖、锁文件和测试配置。App 开发环境通过本地路径使用 SDK。发行安装使用 `pleiad[mcp]==0.3.0`，提供持续 Agent 协作、定向输入、协作状态恢复和共享预算。发布 Weave 前需先发布此 SDK 版本。
+SDK 与 App 是独立 Python 项目，各自在自己的目录维护依赖、锁文件和测试配置。App 开发环境通过本地路径使用 SDK。发行安装使用 `pleiad[mcp]==0.3.1`，提供持续 Agent 协作、定向输入、协作状态恢复、共享预算和可持久化重放的上下文压缩事件。发布 Weave 前需先发布此 SDK 版本。
 
 ```bash
 uv sync --project packages/pleiad --locked --all-groups --all-extras

@@ -388,6 +388,27 @@ def test_concurrent_resume_and_paused_cancel_commit_one_control_outcome(store: S
     asyncio.run(scenario())
 
 
+def test_event_retry_retains_its_cursor_and_original_step_history(store: SessionStore) -> None:
+    async def scenario() -> None:
+        writer = await start_writer(store)
+        step = await writer.begin("agent")
+        await writer.complete(step.step_id, (AssistantMessage(content="original answer"),))
+        before = await store.snapshot(writer.session_id)
+        event = Event(kind="test.started", run_id=writer.run_id)
+        first = await writer.emit(event)
+        retry = await writer.emit(event)
+        second = await writer.emit(Event(kind="test.completed", run_id=writer.run_id))
+        after = await store.snapshot(writer.session_id)
+
+        assert retry == first and first.sequence == 1 and second.sequence == 2
+        assert after.steps == before.steps and after.messages == before.messages
+        assert after.inputs == before.inputs and after.runs == before.runs
+        assert after.revision == before.revision + 2
+        assert await store.read_events(writer.session_id, writer.run_id, after_sequence=first.sequence) == (second,)
+
+    asyncio.run(scenario())
+
+
 def test_receipt_and_event_replay_survive_sqlite_reopen(tmp_path: Path) -> None:
     async def scenario() -> None:
         database = tmp_path / "sessions.sqlite3"

@@ -3,7 +3,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from pathlib import Path
 
 from pleiad.agent.agent import Agent
-from pleiad.context.budget import TokenCounter
+from pleiad.context.budget import ContextCountInput, TokenCounter
 from pleiad.contracts import ContractModel, JsonObject, ToolRef
 from pleiad.messages.images import ImageLimits, ImageResolver
 from pleiad.models.anthropic.client import AnthropicModelClient
@@ -38,6 +38,16 @@ from pleiad.tools.contracts import ToolContext, ToolDescriptor, ToolPolicy, defa
 from pleiad.tools.interruption import ToolInterruption
 from pleiad.tools.registry import ToolRegistry
 from pleiad.tools.runtime import ToolRuntime
+
+
+class RequestMessageCounter:
+    """Count request messages deterministically at the token-counter boundary."""
+
+    estimated = False
+
+    def count(self, request: ContextCountInput) -> int:
+        """Return the complete rendered request's message count."""
+        return len(request.messages)
 
 
 class EchoArguments(ContractModel):

@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable
 
 from pleiad.context.budget import BudgetGuard, BudgetStatus, ContextCountInput
 from pleiad.context.compaction.models import CompactionResult, CompactionState
+from pleiad.context.compaction.observation import CompactionEventContext, CompactionObservation
 from pleiad.context.errors import ContextCompactionError, ContextWindowError
 from pleiad.context.rendering import ContextRenderer
 from pleiad.context.selection.models import ContextView
@@ -37,8 +38,30 @@ class ContextCompactor:
         context_view: ContextView,
         prior_state: CompactionState | None = None,
         summarizer: HistorySummarizer | None = None,
+        event_context: CompactionEventContext | None = None,
     ) -> CompactionResult:
-        """Build a request-local history view and optional rolling summary."""
+        """Build a request-local history view and optional rolling summary.
+
+        Args:
+            steps: Ordered, completed Session history; originals remain unchanged.
+            instructions: Required instructions before adding a rolling summary.
+            input_messages: Current inputs that must remain in the request.
+            tools: Tools declared for the current model request.
+            context_view: Ordered optional request-local reference blocks.
+            prior_state: Existing host summary and original-result references.
+            summarizer: Explicit updater for newly omitted history.
+            event_context: Current request identity and its durable event publisher.
+                Checks without actual reductions never publish lifecycle events.
+
+        Returns:
+            The reduced request view, real summary state, and final budget facts.
+
+        Raises:
+            ValueError: If history contains an incomplete Step.
+            ContextCompactionError: If the supplied summarizer fails or returns empty content.
+            ContextWindowError: If required content cannot fit or a summary updater is missing.
+            asyncio.CancelledError: After recording cancellation of admitted compaction work.
+        """
         if any(not step.completed for step in steps):
             raise ValueError("ContextCompactor accepts completed ModelSteps only")
         selected_context = context_view
@@ -56,17 +79,43 @@ class ContextCompactor:
             context_view=selected_context,
         )
         recent_messages = flatten_steps(recent_steps)
-        replacements = dict(prior_state.replacements) if prior_state is not None else {}
-        replacements.update(large_replacements)
-        recent_messages, new_replacements = replace_old_tool_results(recent_messages, recent_steps)
-        replacements.update(new_replacements)
-
         summary = prior_state.summary if prior_state is not None else None
-        through_sequence = prior_state.through_sequence if prior_state is not None else 0
-        if older_steps:
-            previous_sequence = prior_state.through_sequence if prior_state is not None else 0
-            new_older_steps = tuple(step for step in older_steps if step.sequence > previous_sequence)
+        previous_sequence = prior_state.through_sequence if prior_state is not None else 0
+        through_sequence = previous_sequence
+        new_older_steps = tuple(step for step in older_steps if step.sequence > previous_sequence)
+        reference_changes = tuple(
+            message_id for message_id in old_tool_result_ids(recent_steps) if message_id not in large_replacements
+        )
+        has_actions = bool(older_steps or reference_changes)
+        if not has_actions:
+            candidate_status = self.check(
+                add_summary(instructions, summary), recent_messages, tools, selected_context, input_messages
+            )
+            has_actions = candidate_status.exceeds_window and bool(selected_context.blocks)
+        observation = CompactionObservation(
+            event_context if has_actions else None, status, self.budget.budget.compact_at
+        )
+        try:
+            await observation.start()
+        except asyncio.CancelledError:
+            await observation.cancel()
+            raise
+
+        try:
+            if older_steps:
+                observation.attempted.append("history_trim")
+                observation.completed.append("history_trim")
+            if reference_changes:
+                observation.attempted.append("tool_result_reference")
+            recent_messages, new_replacements = replace_old_tool_results(recent_messages, recent_steps)
+            replacements = dict(prior_state.replacements) if prior_state is not None else {}
+            replacements.update(large_replacements)
+            replacements.update(new_replacements)
+            if reference_changes:
+                observation.completed.append("tool_result_reference")
+            summarized_steps: tuple[ModelStep, ...] = ()
             if new_older_steps and summarizer is not None:
+                observation.attempted.append("rolling_summary")
                 try:
                     summary = await summarizer(summary, new_older_steps)
                 except asyncio.CancelledError:
@@ -76,38 +125,60 @@ class ContextCompactor:
                 if not summary.strip():
                     raise ContextCompactionError("The history summarizer returned empty content.")
                 through_sequence = new_older_steps[-1].sequence
+                summarized_steps = new_older_steps
+                observation.completed.append("rolling_summary")
             elif new_older_steps and summary is not None:
                 raise ContextWindowError("The rolling history summary needs an explicit summarizer to continue.")
 
-        summary_instructions = add_summary(instructions, summary)
-        status = self.check(summary_instructions, recent_messages, tools, selected_context, input_messages)
-        while status.exceeds_window and selected_context.blocks:
-            selected_context = ContextView(selected_context.blocks[:-1])
+            summary_instructions = add_summary(instructions, summary)
             status = self.check(summary_instructions, recent_messages, tools, selected_context, input_messages)
-        if len(selected_context.blocks) < original_context_count:
-            logger.warning(
-                f"context blocks removed for budget removed={original_context_count - len(selected_context.blocks)}"
+            if status.exceeds_window and selected_context.blocks:
+                observation.attempted.append("context_block_trim")
+            while status.exceeds_window and selected_context.blocks:
+                selected_context = ContextView(selected_context.blocks[:-1])
+                status = self.check(summary_instructions, recent_messages, tools, selected_context, input_messages)
+            if len(selected_context.blocks) < original_context_count:
+                observation.completed.append("context_block_trim")
+                logger.warning(
+                    f"context blocks removed for budget removed={original_context_count - len(selected_context.blocks)}"
+                )
+            if status.exceeds_window:
+                raise ContextWindowError(
+                    "The required instructions and recent complete ModelStep cannot fit the context window."
+                )
+            state = None
+            if summary is not None:
+                state = CompactionState(
+                    summary=summary,
+                    through_sequence=max(through_sequence, 1),
+                    replacements=replacements,
+                )
+            elif replacements:
+                state = CompactionState(replacements=replacements)
+            result = CompactionResult(tuple(recent_messages), selected_context, state, status)
+            completed = observation.completion(
+                result,
+                retained=recent_steps,
+                omitted=older_steps,
+                summarized=summarized_steps,
+                previous_sequence=previous_sequence,
+                original_context=context_view,
+                reference_changes=reference_changes,
             )
-        if status.exceeds_window:
-            raise ContextWindowError(
-                "The required instructions and recent complete ModelStep cannot fit the context window."
+            logger.info(
+                f"context compacted steps={len(steps)} retained_steps={len(recent_steps)} "
+                f"through_sequence={through_sequence} recent_tokens={status.input_tokens}"
             )
-        state = None
-        if summary is not None:
-            state = CompactionState(
-                summary=summary,
-                through_sequence=max(through_sequence, 1),
-                replacements=replacements,
-            )
-        elif replacements:
-            state = CompactionState(
-                replacements=replacements,
-            )
-        logger.info(
-            f"context compacted steps={len(steps)} retained_steps={len(recent_steps)} "
-            f"through_sequence={through_sequence} recent_tokens={status.input_tokens}"
-        )
-        return CompactionResult(tuple(recent_messages), selected_context, state, status)
+        except asyncio.CancelledError:
+            await observation.cancel()
+            raise
+        except Exception as error:
+            await observation.fail(error)
+            raise
+        # Terminal delivery is outside the work scope: observer cancellation cannot change its outcome.
+        if completed is not None:
+            await observation.publish(completed)
+        return result
 
     def select_recent_steps(
         self,
@@ -181,24 +252,34 @@ def replace_old_tool_results(
     steps: tuple[ModelStep, ...],
 ) -> tuple[tuple[Message, ...], dict[str, str]]:
     """Replace only large Tool Result bodies from non-latest retained ModelSteps."""
-    if not steps:
-        return messages, {}
-    latest_sequence = steps[-1].sequence
+    candidates = set(old_tool_result_ids(steps))
     replacements: dict[str, str] = {}
     updated: list[Message] = []
-    step_by_message = {message.message_id: step for step in steps for message in step.messages}
     for message in messages:
-        step = step_by_message[message.message_id]
-        if isinstance(message, ToolMessage) and (
-            len(message.content) > MAX_INLINE_TOOL_RESULT_CHARS
-            or (step.sequence < latest_sequence and len(message.content) > 512)
-        ):
+        if isinstance(message, ToolMessage) and message.message_id in candidates:
             content = result_reference_content(message)
             replacements[message.message_id] = content
             updated.append(message.model_copy(update={"content": content}))
         else:
             updated.append(message)
     return tuple(updated), replacements
+
+
+def old_tool_result_ids(steps: tuple[ModelStep, ...]) -> tuple[str, ...]:
+    """Select reference candidates without constructing replacements during budget checks."""
+    if not steps:
+        return ()
+    latest_sequence = steps[-1].sequence
+    return tuple(
+        message.message_id
+        for step in steps
+        for message in step.messages
+        if isinstance(message, ToolMessage)
+        and (
+            len(message.content) > MAX_INLINE_TOOL_RESULT_CHARS
+            or (step.sequence < latest_sequence and len(message.content) > 512)
+        )
+    )
 
 
 def result_reference_content(message: ToolMessage) -> str:

@@ -4,6 +4,7 @@ from typing import Literal
 from pydantic import Field
 
 from pleiad.contracts import ContractModel
+from pleiad.events.context import ContextCompactionLifecycleEvent
 from pleiad.runtime.limits import RunLimits
 from pleiad.sessions.input import InputEnvelope
 from pleiad.tools.contracts import ToolContext
@@ -118,6 +119,7 @@ class CollaborationEvent(ContractModel):
     source_sequence: int | None = None
     step_id: str | None = None
     actor_id: str | None = None
+    compaction: ContextCompactionLifecycleEvent | None = None
 
 
 class MessageStatus(ContractModel):

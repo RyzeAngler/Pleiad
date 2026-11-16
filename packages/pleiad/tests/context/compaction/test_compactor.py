@@ -5,13 +5,23 @@ from pathlib import Path
 import pytest
 from pydantic import TypeAdapter
 
+import pleiad.context.compaction.observation as observation_module
 from pleiad.context.budget import ApproximateTokenCounter, BudgetGuard, ContextBudget, ContextCountInput
 from pleiad.context.compaction.compactor import ContextCompactor
 from pleiad.context.compaction.models import CompactionState
-from pleiad.context.errors import ContextWindowError
+from pleiad.context.compaction.observation import CompactionEventContext
+from pleiad.context.errors import ContextCompactionError, ContextWindowError
 from pleiad.context.rendering import ContextRenderer
 from pleiad.context.selection.models import ContextBlock, ContextView
 from pleiad.contracts import JsonObject
+from pleiad.events.context import (
+    CompactionTokens,
+    ContextCompactionCancelledEvent,
+    ContextCompactionCompletedEvent,
+    ContextCompactionFailedEvent,
+    ContextCompactionStartedEvent,
+)
+from pleiad.events.contracts import Event
 from pleiad.messages.images import ImageBlock, ImageReference
 from pleiad.messages.message import AssistantMessage, ToolCall, ToolMessage, UserMessage
 from pleiad.messages.results import ToolResultReference
@@ -36,6 +46,23 @@ class MessageCountCounter:
     def count(self, request: ContextCountInput) -> int:
         """Return the number of request messages."""
         return len(request.messages)
+
+
+class CompactionEvents:
+    """Collect public notifications at the host event boundary."""
+
+    def __init__(self) -> None:
+        self.events: list[Event] = []
+        self.context = CompactionEventContext(
+            run_id="current-run",
+            step_id="active-step",
+            agent_name="request-agent",
+            parent_run_id="parent-run",
+            event_sink=self.receive,
+        )
+
+    async def receive(self, event: Event) -> None:
+        self.events.append(event)
 
 
 def completed_step(sequence: int) -> ModelStep:
@@ -78,6 +105,7 @@ def test_compactor_discards_only_whole_old_steps() -> None:
     """Compaction retains a complete recent ModelStep and records the omitted boundary."""
     budget = ContextBudget(window_tokens=20, output_reserve=2, compact_at=5, recent_tokens=3)
     compactor = ContextCompactor(BudgetGuard(budget, MessageCountCounter()))
+    notifications = CompactionEvents()
 
     result = asyncio.run(
         compactor.compact(
@@ -87,6 +115,7 @@ def test_compactor_discards_only_whole_old_steps() -> None:
             tools=(),
             context_view=ContextView(),
             summarizer=summarize,
+            event_context=notifications.context,
         ),
     )
 
@@ -95,6 +124,23 @@ def test_compactor_discards_only_whole_old_steps() -> None:
         summary="omitted=1,2 previous=none",
         through_sequence=2,
     )
+    started, completed = notifications.events
+    assert isinstance(started, ContextCompactionStartedEvent)
+    assert isinstance(completed, ContextCompactionCompletedEvent)
+    assert started.compaction_id == completed.compaction_id and started.event_id != completed.event_id
+    assert (started.run_id, started.step_id, started.agent_name) == ("current-run", "active-step", "request-agent")
+    assert started.parent_run_id == "parent-run"
+    assert started.trigger_reasons == ("compact_at_reached",)
+    assert started.before == CompactionTokens(input_tokens=6, estimated=False, unestimated_images=0)
+    assert completed.after == CompactionTokens(input_tokens=2, estimated=False, unestimated_images=0)
+    assert completed.duration_ms >= 0
+    assert completed.strategies_attempted == completed.strategies_completed == ("history_trim", "rolling_summary")
+    assert completed.summary is not None and completed.summary.operation == "created"
+    assert completed.summary.previous_through_sequence is None and completed.summary.through_sequence == 2
+    assert [step.sequence for step in completed.summary.added_steps] == [1, 2]
+    assert [step.sequence for step in completed.retained_steps] == [3]
+    assert [step.sequence for step in completed.omitted_steps] == [1, 2]
+    assert all(step.run_id == "run" for step in completed.omitted_steps)
 
 
 def test_compactor_counts_retained_reference_only_in_rendered_message() -> None:
@@ -144,9 +190,16 @@ def test_large_tool_observation_can_be_read_in_pages_after_compaction(
             recent_tokens=1 if force_compaction else 16_000,
         )
         counter = MessageCountCounter() if force_compaction else ApproximateTokenCounter()
+        notifications = CompactionEvents()
         compacted = await ContextCompactor(BudgetGuard(budget, counter)).compact(
-            await memory.read(), instructions="rules", input_messages=(), tools=(), context_view=ContextView()
+            await memory.read(),
+            instructions="rules",
+            input_messages=(),
+            tools=(),
+            context_view=ContextView(),
+            event_context=notifications.context,
         )
+        assert notifications.events == []
         view = next(message for message in compacted.messages if isinstance(message, ToolMessage))
         placeholder = TypeAdapter[JsonObject](JsonObject).validate_json(view.content)
         reference = ToolResultReference.model_validate(
@@ -240,18 +293,34 @@ def test_result_references_remain_discoverable_after_their_whole_step_is_omitted
     asyncio.run(scenario())
 
 
-def test_continuation_budget_counts_and_prunes_references_beside_history_user() -> None:
+@pytest.mark.parametrize("retain_reference", [False, True], ids=["remove-all-references", "retain-small-reference"])
+def test_continuation_budget_counts_and_prunes_references_beside_history_user(retain_reference: bool) -> None:
     """A continuation request counts its references before selecting a budget view."""
     budget = ContextBudget(window_tokens=1_000, output_reserve=100, compact_at=800, recent_tokens=500)
     steps = (completed_step(1),)
-    view = ContextView((ContextBlock(kind="knowledge", origin="document", content="large-reference " * 1_000),))
+    blocks: tuple[ContextBlock, ...] = (
+        ContextBlock(kind="knowledge", origin="large-document", content="large-reference " * 1_000),
+    )
+    if retain_reference:
+        blocks = (
+            ContextBlock(kind="knowledge", origin="retained-document", content="short retained reference"),
+            *blocks,
+        )
+    view = ContextView(blocks)
+    retained_count = 1 if retain_reference else 0
+    notifications = CompactionEvents()
     result = asyncio.run(
         ContextCompactor(BudgetGuard(budget)).compact(
-            steps, instructions="rules", input_messages=(), tools=(), context_view=view
+            steps,
+            instructions="rules",
+            input_messages=(),
+            tools=(),
+            context_view=view,
+            event_context=notifications.context,
         )
     )
 
-    assert result.context_view.blocks == ()
+    assert result.context_view.blocks == view.blocks[:retained_count]
     assert result.messages == steps[0].messages
     wire_messages = ContextRenderer().render_messages(
         result.messages, input_messages=(), context_view=result.context_view
@@ -260,6 +329,21 @@ def test_continuation_budget_counts_and_prunes_references_beside_history_user() 
         ContextCountInput(instructions="rules", messages=wire_messages, tools=(), context_view=ContextView())
     )
     assert result.budget.input_tokens == wire_count
+    started, completed = notifications.events
+    assert isinstance(started, ContextCompactionStartedEvent)
+    assert isinstance(completed, ContextCompactionCompletedEvent)
+    assert started.trigger_reasons == ("compact_at_reached", "context_window_exceeded")
+    assert started.before.input_tokens > budget.available_tokens
+    assert started.before.estimated and completed.after.estimated
+    assert completed.after.input_tokens == wire_count
+    assert completed.strategies_attempted == completed.strategies_completed == ("context_block_trim",)
+    assert completed.summary is None and completed.omitted_steps == ()
+    assert [(block.index, block.kind, block.origin) for block in completed.retained_context_blocks] == [
+        (index, block.kind, block.origin) for index, block in enumerate(view.blocks[:retained_count])
+    ]
+    assert [(block.index, block.kind, block.origin) for block in completed.removed_context_blocks] == [
+        (retained_count, "knowledge", "large-document")
+    ]
 
 
 def test_compactor_rejects_a_batch_that_cannot_fit_without_dropping_current_inputs() -> None:
@@ -415,6 +499,7 @@ def test_compaction_retains_image_steps() -> None:
     image_step = image_tool_step(2)
     latest = completed_step(5)
     budget = ContextBudget(window_tokens=20, output_reserve=2, compact_at=6, recent_tokens=5)
+    notifications = CompactionEvents()
 
     compacted = asyncio.run(
         ContextCompactor(BudgetGuard(budget, MessageCountCounter())).compact(
@@ -424,11 +509,18 @@ def test_compaction_retains_image_steps() -> None:
             tools=(),
             context_view=ContextView(),
             summarizer=summarize,
+            event_context=notifications.context,
         )
     )
 
     assert compacted.messages == (*image_step.messages, *latest.messages)
     assert compacted.state == CompactionState(summary="omitted=1,3,4 previous=none", through_sequence=4)
+    completed = notifications.events[-1]
+    assert isinstance(completed, ContextCompactionCompletedEvent)
+    assert completed.summary is not None and completed.summary.through_sequence == 4
+    assert [step.sequence for step in completed.summary.added_steps] == [1, 3, 4]
+    assert [step.step_id for step in completed.retained_steps] == ["image-step-2", "step-5"]
+    assert [step.sequence for step in completed.omitted_steps] == [1, 3, 4]
 
 
 def test_compaction_prioritizes_images() -> None:
@@ -472,6 +564,7 @@ def test_summary_covers_text_between_pinned_image_and_recent_steps_after_restora
         steps = (completed_step(1), image_step, completed_step(3), completed_step(4))
         budget = ContextBudget(window_tokens=20, output_reserve=2, compact_at=6, recent_tokens=5)
         compactor = ContextCompactor(BudgetGuard(budget, MessageCountCounter()))
+        notifications = CompactionEvents()
         first = await compactor.compact(
             steps,
             instructions="rules",
@@ -479,6 +572,7 @@ def test_summary_covers_text_between_pinned_image_and_recent_steps_after_restora
             tools=(),
             context_view=ContextView(),
             summarizer=summarize,
+            event_context=notifications.context,
         )
         assert first.state is not None
         restored_state = CompactionState.model_validate_json(first.state.model_dump_json())
@@ -490,6 +584,7 @@ def test_summary_covers_text_between_pinned_image_and_recent_steps_after_restora
             context_view=ContextView(),
             prior_state=restored_state,
             summarizer=summarize,
+            event_context=notifications.context,
         )
 
         assert following.messages == (*image_step.messages, *completed_step(5).messages)
@@ -497,6 +592,18 @@ def test_summary_covers_text_between_pinned_image_and_recent_steps_after_restora
         assert following.state == CompactionState(
             summary="omitted=4 previous=omitted=1,3 previous=none", through_sequence=4
         )
+        previous_completed = notifications.events[1]
+        completed = notifications.events[-1]
+        assert isinstance(previous_completed, ContextCompactionCompletedEvent)
+        assert isinstance(completed, ContextCompactionCompletedEvent)
+        assert previous_completed.compaction_id != completed.compaction_id
+        assert completed.summary is not None and completed.summary.operation == "updated"
+        assert completed.summary.previous_through_sequence == 3 and completed.summary.through_sequence == 4
+        assert [step.sequence for step in completed.summary.added_steps] == [4]
+        assert [step.sequence for step in completed.retained_steps] == [2, 5]
+        attempts = [event for event in notifications.events if isinstance(event, ContextCompactionStartedEvent)]
+        assert len(attempts) == 2 and attempts[0].compaction_id != attempts[1].compaction_id
+        assert completed.compaction_id == attempts[1].compaction_id
 
     asyncio.run(scenario())
 
@@ -554,5 +661,256 @@ def test_restored_prefix_summary_adds_previously_omitted_text_beyond_pinned_imag
             summary="omitted=3 previous=first question remains relevant",
             through_sequence=3,
         )
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("compact_at", [2, 3], ids=["at-threshold-without-actions", "within-budget"])
+def test_budget_checks_without_actual_reductions_emit_no_compaction_events(compact_at: int) -> None:
+    notifications = CompactionEvents()
+    step = completed_step(1)
+    budget = ContextBudget(window_tokens=20, output_reserve=2, compact_at=compact_at, recent_tokens=1)
+
+    result = asyncio.run(
+        ContextCompactor(BudgetGuard(budget, MessageCountCounter())).compact(
+            (step,),
+            instructions="rules",
+            input_messages=(),
+            tools=(),
+            context_view=ContextView(),
+            event_context=notifications.context,
+        )
+    )
+
+    assert result.messages == step.messages and result.state is None
+    assert notifications.events == []
+
+
+def test_reusing_a_summary_without_new_reductions_emits_no_compaction_events() -> None:
+    notifications = CompactionEvents()
+    prior = CompactionState(summary="previous history", through_sequence=1)
+    budget = ContextBudget(window_tokens=20, output_reserve=2, compact_at=2, recent_tokens=1)
+
+    result = asyncio.run(
+        ContextCompactor(BudgetGuard(budget, MessageCountCounter())).compact(
+            (completed_step(2),),
+            instructions="rules",
+            input_messages=(),
+            tools=(),
+            context_view=ContextView(),
+            prior_state=prior,
+            event_context=notifications.context,
+        )
+    )
+
+    assert result.state == prior
+    assert notifications.events == []
+
+
+def test_compaction_duration_excludes_time_spent_notifying_observers(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario() -> None:
+        clock = 0.0
+        events: list[Event] = []
+
+        def read_clock() -> float:
+            return clock
+
+        async def observe(event: Event) -> None:
+            nonlocal clock
+            clock += 100
+            events.append(event)
+
+        async def summarize_history(previous: str | None, steps: tuple[ModelStep, ...]) -> str:
+            nonlocal clock
+            clock += 0.25
+            return await summarize(previous, steps)
+
+        monkeypatch.setattr(observation_module, "monotonic", read_clock)
+        context = CompactionEventContext(run_id="run", step_id="active", agent_name="agent", event_sink=observe)
+        budget = ContextBudget(window_tokens=20, output_reserve=2, compact_at=5, recent_tokens=3)
+        await ContextCompactor(BudgetGuard(budget, MessageCountCounter())).compact(
+            tuple(completed_step(sequence) for sequence in range(1, 4)),
+            instructions="rules",
+            input_messages=(),
+            tools=(),
+            context_view=ContextView(),
+            summarizer=summarize_history,
+            event_context=context,
+        )
+        assert clock == 200.25
+        assert isinstance(events[-1], ContextCompactionCompletedEvent)
+        assert events[-1].duration_ms == 250
+
+    asyncio.run(scenario())
+
+
+def test_reference_only_compaction_reports_real_replacements_without_claiming_a_summary() -> None:
+    notifications = CompactionEvents()
+    pinned = image_tool_step(1)
+    original = ToolMessage(message_id="large-observation", tool_call_id="inspect-1", content="original facts " * 100)
+    pinned = pinned.model_copy(update={"messages": (*pinned.messages[:-1], original)})
+    latest = completed_step(2)
+    budget = ContextBudget(window_tokens=20, output_reserve=2, compact_at=5, recent_tokens=4)
+
+    result = asyncio.run(
+        ContextCompactor(BudgetGuard(budget, MessageCountCounter())).compact(
+            (pinned, latest),
+            instructions="rules",
+            input_messages=(),
+            tools=(),
+            context_view=ContextView(),
+            event_context=notifications.context,
+        )
+    )
+
+    completed = notifications.events[-1]
+    assert isinstance(completed, ContextCompactionCompletedEvent)
+    assert completed.strategies_attempted == completed.strategies_completed == ("tool_result_reference",)
+    assert completed.replaced_tool_result_ids == (original.message_id,)
+    assert completed.summary is None and completed.omitted_steps == ()
+    assert [step.sequence for step in completed.retained_steps] == [1, 2]
+    reference_message = next(message for message in result.messages if message.message_id == original.message_id)
+    assert isinstance(reference_message, ToolMessage) and reference_message.content != original.content
+    reference = TypeAdapter[JsonObject](JsonObject).validate_json(reference_message.content)
+    assert reference["message_id"] == original.message_id
+    assert reference["total_chars"] == len(original.content)
+    assert pinned.messages[-1] == original
+
+
+def test_compaction_keeps_unestimated_image_costs_unknown_in_both_token_snapshots() -> None:
+    notifications = CompactionEvents()
+    counter = ApproximateTokenCounter(allow_unestimated_images=True)
+    budget = ContextBudget(window_tokens=10_000, output_reserve=100, compact_at=300, recent_tokens=250)
+    text_steps = tuple(completed_step(sequence) for sequence in range(2, 9))
+    result = asyncio.run(
+        ContextCompactor(BudgetGuard(budget, counter)).compact(
+            (image_tool_step(1), *text_steps),
+            instructions="rules",
+            input_messages=(),
+            tools=(),
+            context_view=ContextView(),
+            event_context=notifications.context,
+        )
+    )
+
+    started, completed = notifications.events
+    assert isinstance(started, ContextCompactionStartedEvent)
+    assert isinstance(completed, ContextCompactionCompletedEvent)
+    assert started.before.estimated and completed.after.estimated
+    assert started.before.image_tokens is None and completed.after.image_tokens is None
+    assert started.before.unestimated_images == completed.after.unestimated_images == 1
+    assert completed.after.input_tokens == result.budget.input_tokens < started.before.input_tokens
+    assert any(step.step_id == "image-step-1" for step in completed.retained_steps)
+
+
+@pytest.mark.parametrize("empty_summary", [False, True], ids=["summarizer-error", "empty-summary"])
+def test_failed_summary_reports_only_confirmed_stages_and_preserves_the_original_failure(empty_summary: bool) -> None:
+    async def scenario() -> None:
+        notifications = CompactionEvents()
+        original_error = RuntimeError("private upstream diagnostic")
+
+        async def failing_summary(previous: str | None, steps: tuple[ModelStep, ...]) -> str:
+            if empty_summary:
+                return "  "
+            raise original_error
+
+        budget = ContextBudget(window_tokens=20, output_reserve=2, compact_at=5, recent_tokens=3)
+        with pytest.raises(ContextCompactionError) as caught:
+            await ContextCompactor(BudgetGuard(budget, MessageCountCounter())).compact(
+                tuple(completed_step(sequence) for sequence in range(1, 4)),
+                instructions="rules",
+                input_messages=(),
+                tools=(),
+                context_view=ContextView(),
+                summarizer=failing_summary,
+                event_context=notifications.context,
+            )
+
+        started, failed = notifications.events
+        assert isinstance(started, ContextCompactionStartedEvent)
+        assert isinstance(failed, ContextCompactionFailedEvent)
+        assert failed.compaction_id == started.compaction_id
+        assert failed.strategies_attempted == ("history_trim", "rolling_summary")
+        assert failed.strategies_completed == ("history_trim",)
+        assert failed.error_code == "context.compaction.failed"
+        assert failed.error_message == caught.value.message
+        assert failed.duration_ms >= 0
+        assert "after" not in failed.model_dump() and "summary" not in failed.model_dump()
+        assert "private upstream diagnostic" not in failed.model_dump_json()
+        if not empty_summary:
+            assert caught.value.__cause__ is original_error
+
+    asyncio.run(scenario())
+
+
+def test_context_trimming_that_still_cannot_fit_reports_failure_without_a_final_request() -> None:
+    notifications = CompactionEvents()
+    budget = ContextBudget(window_tokens=4, output_reserve=1, compact_at=2, recent_tokens=1)
+    inputs = tuple(UserMessage(content=f"required request {index}") for index in range(4))
+    view = ContextView((ContextBlock(kind="knowledge", origin="document", content="optional reference"),))
+
+    with pytest.raises(ContextWindowError) as caught:
+        asyncio.run(
+            ContextCompactor(BudgetGuard(budget, MessageCountCounter())).compact(
+                (),
+                instructions="rules",
+                input_messages=inputs,
+                tools=(),
+                context_view=view,
+                event_context=notifications.context,
+            )
+        )
+
+    started, failed = notifications.events
+    assert isinstance(started, ContextCompactionStartedEvent)
+    assert isinstance(failed, ContextCompactionFailedEvent)
+    assert failed.compaction_id == started.compaction_id
+    assert failed.strategies_attempted == failed.strategies_completed == ("context_block_trim",)
+    assert failed.error_code == "context.window.exceeded" and failed.error_message == caught.value.message
+    assert "after" not in failed.model_dump() and "retained_context_blocks" not in failed.model_dump()
+
+
+def test_cancelling_an_active_summary_reports_one_cancellation_and_propagates_cancelled_error() -> None:
+    async def scenario() -> None:
+        notifications = CompactionEvents()
+        entered = asyncio.Event()
+        cleaned = asyncio.Event()
+        release = asyncio.Event()
+
+        async def blocked_summary(previous: str | None, steps: tuple[ModelStep, ...]) -> str:
+            entered.set()
+            try:
+                await release.wait()
+                return await summarize(previous, steps)
+            finally:
+                cleaned.set()
+
+        budget = ContextBudget(window_tokens=20, output_reserve=2, compact_at=5, recent_tokens=3)
+        async with asyncio.TaskGroup() as tasks:
+            task = tasks.create_task(
+                ContextCompactor(BudgetGuard(budget, MessageCountCounter())).compact(
+                    tuple(completed_step(sequence) for sequence in range(1, 4)),
+                    instructions="rules",
+                    input_messages=(),
+                    tools=(),
+                    context_view=ContextView(),
+                    summarizer=blocked_summary,
+                    event_context=notifications.context,
+                )
+            )
+            await asyncio.wait_for(entered.wait(), timeout=3)
+            assert len(notifications.events) == 1
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        started, cancelled = notifications.events
+        assert isinstance(started, ContextCompactionStartedEvent)
+        assert isinstance(cancelled, ContextCompactionCancelledEvent)
+        assert cleaned.is_set() and cancelled.compaction_id == started.compaction_id
+        assert cancelled.strategies_attempted == ("history_trim", "rolling_summary")
+        assert cancelled.strategies_completed == ("history_trim",)
+        assert cancelled.duration_ms >= 0
+        assert "after" not in cancelled.model_dump() and "error_message" not in cancelled.model_dump()
 
     asyncio.run(scenario())

@@ -53,7 +53,7 @@ def test_distributions_install_without_the_checkout_and_ship_only_product_resour
         assert "pleiad/models/providers/volcengine.py" in names
         sdk_metadata_path = next(name for name in names if name.endswith(".dist-info/METADATA"))
         sdk_metadata = Parser().parsestr(archive.read(sdk_metadata_path).decode("utf-8"))
-        assert sdk_metadata["Version"] == "0.3.0"
+        assert sdk_metadata["Version"] == "0.3.1"
         assert "volcengine" in sdk_metadata.get_all("Provides-Extra", [])
         volcengine_dependencies = {
             requirement.name
@@ -63,6 +63,8 @@ def test_distributions_install_without_the_checkout_and_ship_only_product_resour
         }
         assert {"openai", "httpx"} <= volcengine_dependencies
         assert "pleiad/sessions/model_step.py" in names
+        assert "pleiad/events/context.py" in names
+        assert "pleiad/context/compaction/observation.py" in names
         assert not any(name.startswith("pleiad/memory/") for name in names)
         assert "pleiad/runtime/runner.py" in names
         assert "pleiad/runtime/handle.py" in names
@@ -84,7 +86,8 @@ def test_distributions_install_without_the_checkout_and_ship_only_product_resour
         ]
         assert sdk_requirements
         for requirement in sdk_requirements:
-            assert Version("0.3.0") in requirement.specifier
+            assert Version("0.3.1") in requirement.specifier
+            assert Version("0.3.0") not in requirement.specifier
             assert Version("0.2.0") not in requirement.specifier
         assert "pleiad_weave/agent/graph.py" in names
         assert "pleiad_weave/capabilities/approval.py" in names
@@ -142,6 +145,8 @@ import asyncio
 import re
 from importlib.resources import files
 from pleiad.agent.agent import Agent
+from pleiad.events.context import ContextCompactionLifecycleEvent, ContextCompactionStartedEvent
+from pleiad.context.compaction.observation import CompactionEventContext
 from pleiad.messages.images import ImageBlock, ImageReference
 from pleiad.models.binding import binding_fingerprint
 from pleiad.models.openai.client import OpenAIModelClient
@@ -165,7 +170,14 @@ from pleiad_weave.application.service import ExecutionService
 from pleiad_weave.infrastructure.bootstrap import create_application
 from pleiad_weave.infrastructure.sandbox.images import bundled_python_image_definition
 validate_json_schema({"type": "object"})
-assert __version__ == "0.3.0"
+compaction = ContextCompactionStartedEvent(
+    run_id="installed-run", step_id="installed-step", agent_name="installed-agent",
+    compaction_id="installed-compaction", trigger_reasons=("compact_at_reached",),
+    compact_at=100, available_tokens=200,
+    before={"input_tokens": 110, "estimated": True, "unestimated_images": 0},
+)
+assert ContextCompactionStartedEvent.model_validate_json(compaction.model_dump_json()) == compaction
+assert __version__ == "0.3.1"
 image = ImageBlock(image=ImageReference(
     reference="asset:installed", sha256="a" * 64, mime="image/png", width=1, height=1,
 ))

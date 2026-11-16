@@ -18,6 +18,7 @@ from pleiad.context.compaction.compactor import ContextCompactor, HistorySummari
 from pleiad.context.selection.models import ContextBlock
 from pleiad.contracts import CapabilityGrants, JsonObject, JsonValue, thaw_json_object
 from pleiad.errors.base import PleiadError
+from pleiad.events.context import ContextCompactionEvent
 from pleiad.events.contracts import Event, EventSink
 from pleiad.events.message import MessageCompletedEvent
 from pleiad.events.runtime import (
@@ -56,6 +57,7 @@ from pleiad.sessions.model_step import ModelStep
 from pleiad.sessions.records import RunReceipt, RunSnapshot, RunStatus
 from pleiad.sessions.recovery import ActionEvidence, ReconcileResult
 from pleiad.sessions.session import Session
+from pleiad.sessions.store import complete_owned
 from pleiad.sessions.usage import RunUsage
 from pleiad.sessions.writer import SessionWriter
 from pleiad.skills.contracts import Skill
@@ -442,8 +444,14 @@ class Runner:
                 handle.control.usage = usage
 
                 async def publish(event: Event) -> None:
-                    await writer.emit(event)
-                    await handle.notify()
+                    async def commit_event() -> None:
+                        await writer.emit(event)
+                        await handle.notify()
+
+                    if isinstance(event, ContextCompactionEvent):
+                        await complete_owned(commit_event())
+                    else:
+                        await commit_event()
                     if self.event_sink is not None:
                         try:
                             await self.event_sink(event)

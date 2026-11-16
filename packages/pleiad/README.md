@@ -84,8 +84,8 @@ The host injects an asynchronous resolver into `Runner`. Every request, includin
 a text-only follow-up or resumed Run, authorizes retained images again and checks
 their SHA-256, metadata and physical limits before model admission.
 
-These APIs were introduced in Pleiad 0.2.0. Install `pleiad[models]==0.3.0`
-for all model adapters, or `pleiad[volcengine]==0.3.0` for Ark. For a source checkout, run
+These APIs were introduced in Pleiad 0.2.0. Install `pleiad[models]==0.3.1`
+for all model adapters, or `pleiad[volcengine]==0.3.1` for Ark. For a source checkout, run
 `uv sync --project packages/pleiad --locked --all-groups --all-extras` from the
 repository root, then use `uv run --project packages/pleiad --frozen python`.
 The following example uses a known one-pixel PNG. Set
@@ -406,6 +406,67 @@ offset. Completed background results use a separate `operation_id` selector and
 `kind="operation"` reference listing. Both access paths remain within the bound
 Session, including historical Runs. Oversized observations retain complete source
 content in the store.
+
+Pleiad 0.3.1 context compaction publishes `context.compaction.started`, `.completed`, `.failed`,
+and `.cancelled` through the same persisted Run event journal as model and Tool
+events. Import their typed models from `pleiad.events.context`. Every attempt has
+one `compaction_id`, the requesting `run_id`, `step_id`, and `agent_name`, and the
+real `parent_run_id` for a child Run. Historical Step references carry their own
+original Run identity and Session sequence.
+
+```python
+from pleiad.events.context import ContextCompactionCompletedEvent, ContextCompactionStartedEvent
+from pleiad.events.contracts import Event
+
+async def observe(event: Event) -> None:
+    if isinstance(event, ContextCompactionStartedEvent):
+        print(event.agent_name, event.compaction_id, "compacting")
+    elif isinstance(event, ContextCompactionCompletedEvent):
+        print(event.compaction_id, event.before.input_tokens, event.after.input_tokens)
+
+# Pass observe as Runner(event_sink=observe, ...).
+```
+
+Events are committed before subscribers are notified. `handle.events(after_sequence=cursor)`
+replays the same serialized payloads and then observes new commits. Detaching a
+subscriber does not cancel compaction. For historical reads, use
+`session.store.read_events(session.session_id, run_id, after_sequence=cursor)`;
+`ContextCompactionLifecycleEvent` is a discriminated union suitable for a
+Pydantic `TypeAdapter`. Collaboration progress includes the typed source event
+in `CollaborationEvent.compaction`, with its original `source_sequence`.
+
+Budget checks, requests without reductions, reuse of an existing summary alone,
+and routine oversized-result normalization do not emit compaction events.
+Once a real reduction is selected, `started` precedes execution and exactly one
+terminal event records its managed outcome while storage is available. A failed
+store write propagates; a process crash may leave a started attempt with an
+unknown outcome. Replay never fabricates a terminal event.
+
+`trigger_reasons` records actual threshold/window conditions. Terminal events
+separate `strategies_attempted` from `strategies_completed`: `history_trim`,
+`rolling_summary`, `tool_result_reference`, and `context_block_trim` describe
+request-local work, not deletion of original history. `duration_ms` measures work
+after start notification and before terminal notification. Cancellation while
+notifying admission has zero work time. Cancelling a terminal notification does
+not turn an already completed attempt into a cancelled one.
+
+`before` measures the initial budget-checked request after routine oversized-result
+normalization; `after` measures the final request with its summary and selected
+references. Each snapshot retains its own `estimated`, `image_tokens`, and
+`unestimated_images`. Unknown image costs remain unknown. Failed and cancelled
+events have no final `after` or output ranges. Failures include safe
+`error_code` and `error_message`; the original exception cause remains available
+to the caller. Deadline cancellation emits a compaction cancellation while the
+Run retains its timeout outcome.
+
+Completed events identify retained/omitted Steps, additional Tool result
+references, and retained/removed ContextBlocks by their original index, kind,
+and origin. They contain no message, Tool-result, reference-block, or summary
+body. `summary` is null without a real host summary; otherwise it records
+creation/update/reuse, the previous and final high-water cursors, and exact
+`added_steps`. Pinned image Steps can make coverage discontinuous: a summary
+cursor is never a claim that every earlier Step was summarized. Unknown exact
+coverage from an existing summary is not inferred from its cursor.
 
 A host enables `ToolPolicy.background=True` for a Tool that implements
 `supports_background` and `execute_background`. The Tool receives a

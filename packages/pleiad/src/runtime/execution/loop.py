@@ -16,6 +16,7 @@ from pleiad.agent.prompt import build_prompt
 from pleiad.context.budget import ContextBudget
 from pleiad.context.compaction.compactor import ContextCompactor, HistorySummarizer, add_summary
 from pleiad.context.compaction.models import CompactionState
+from pleiad.context.compaction.observation import CompactionEventContext
 from pleiad.context.rendering import ContextRenderer
 from pleiad.context.selection.builder import ContextBuilder
 from pleiad.context.selection.models import ContextBlock
@@ -269,6 +270,17 @@ class AgentLoop:
                             context_view=context_view,
                             prior_state=current_compaction,
                             summarizer=history_summarizer,
+                            event_context=(
+                                None
+                                if event_sink is None
+                                else CompactionEventContext(
+                                    run_id=run_id,
+                                    step_id=current_step_id,
+                                    agent_name=agent.name,
+                                    parent_run_id=parent_run_id,
+                                    event_sink=event_sink,
+                                )
+                            ),
                         )
                         self.observability.finish(compaction_span, "succeeded")
                     current_compaction = compacted.state

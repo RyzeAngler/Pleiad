@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 
 from pleiad.runtime.events import RunEvent
 from pleiad.runtime.execution.control_state import RunControl
@@ -58,7 +58,7 @@ class RunHandle:
         async with self.condition:
             self.condition.notify_all()
 
-    async def events(self, *, after_sequence: int = 0) -> AsyncIterator[RunEvent]:
+    async def events(self, *, after_sequence: int = 0) -> AsyncGenerator[RunEvent, None]:
         """Replay persisted events and observe new commits without owning execution.
 
         Args:

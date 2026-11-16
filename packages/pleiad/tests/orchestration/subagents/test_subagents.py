@@ -11,7 +11,10 @@ from pydantic import TypeAdapter, ValidationError
 import pleiad.runtime.runner as runner_module
 from pleiad.agent.agent import Agent
 from pleiad.budgets import BudgetLedger, BudgetState, BudgetStateError
+from pleiad.context.budget import ContextBudget
+from pleiad.context.selection.models import ContextBlock
 from pleiad.contracts import CapabilityGrants, JsonObject, ToolRef
+from pleiad.events.context import ContextCompactionCompletedEvent, ContextCompactionEvent, ContextCompactionStartedEvent
 from pleiad.events.contracts import Event
 from pleiad.events.runtime import ModelStepCompletedEvent
 from pleiad.events.subagents import DelegationStatus, SubagentCompletedEvent, SubagentConsumedEvent
@@ -137,6 +140,54 @@ def test_as_tool_runs_a_real_isolated_child_and_returns_one_controlled_result(tm
     second_request = parent_model.requests[1]
     assert second_request.messages[-1].role == "tool"
     assert record.child_run_id in (second_request.messages[-1].content or "")
+
+
+def test_scoped_subagent_publishes_compaction_with_its_child_run_and_parent_identity(tmp_path: Path) -> None:
+    model = FakeOpenAIModel((text_batch("child answer", "child-final"),))
+    runner, original = make_runner(model, tmp_path)
+    child = Agent(name="child", model=original.model, prompt="Answer the task.", tools=())
+    events: list[ContextCompactionEvent] = []
+
+    async def observe(event: Event) -> None:
+        if isinstance(event, ContextCompactionEvent):
+            events.append(event)
+
+    runner.event_sink = observe
+    subagent = Subagent(
+        "child",
+        child,
+        runner,
+        limits=RunLimits(
+            context_budget=ContextBudget(window_tokens=4_000, output_reserve=100, compact_at=3_000, recent_tokens=500)
+        ),
+        context_selector=lambda task: (ContextBlock(kind="reference", origin="host", content=f"{task} " * 10_000),),
+    )
+    group = SubagentGroup((subagent,))
+
+    async def scenario() -> None:
+        result = await group.run_subagent("child", "Review", ToolContext(call_id="delegate", run_id="parent-run"))
+        assert result.state is RunStatus.SUCCEEDED
+        assert len(events) == 2
+        started, completed = events
+        assert isinstance(started, ContextCompactionStartedEvent)
+        assert isinstance(completed, ContextCompactionCompletedEvent)
+        assert started.compaction_id == completed.compaction_id
+        assert started.run_id == completed.run_id == result.run_id
+        assert completed.parent_run_id == "parent-run" and completed.agent_name == "child"
+        assert completed.strategies_completed == ("context_block_trim",)
+        assert completed.summary is None and not completed.retained_steps and not completed.omitted_steps
+        assert completed.removed_context_blocks and completed.before.input_tokens > completed.after.input_tokens
+        delegation = next(iter(group.records.values()))
+        assert delegation.child_run_id == result.run_id
+        session = subagent.session(delegation.delegation_id)
+        history = await session.history()
+        assert history[0].step_id == completed.step_id
+        replay = await session.store.read_events(session.session_id, result.run_id)
+        assert [record.data for record in replay if record.kind.startswith("context.compaction.")] == [
+            event.model_dump(mode="json") for event in events
+        ]
+
+    asyncio.run(scenario())
 
 
 def test_submit_subagent_returns_acceptance_before_one_completion_event(tmp_path: Path) -> None:

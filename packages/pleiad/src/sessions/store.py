@@ -656,7 +656,12 @@ class SessionStore(ABC):
                 timestamp=event.timestamp,
                 data=data,
             )
-            return updated_state(state, events=(*state.events, value)), (value, snapshot)
+            # The backend validated the unchanged history; the new event is also validated.
+            # Recheck journal invariants without serializing and reconstructing those models.
+            updated = SessionState.model_validate(
+                state.model_copy(update={"events": (*state.events, value), "revision": state.revision + 1})
+            )
+            return updated, (value, snapshot)
 
         return await self.transact(session_id, record)
 

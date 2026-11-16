@@ -68,11 +68,31 @@ class SqliteSessionStore(SessionStore):
                 if updated.session_id != session_id:
                     raise SessionConflictError("A transaction cannot change its Session identity.")
                 if updated != state:
-                    connection.execute(
-                        "INSERT INTO session_journals(session_id,revision,payload) VALUES(?,?,?) "
-                        "ON CONFLICT(session_id) DO UPDATE SET revision=excluded.revision,payload=excluded.payload",
-                        (session_id, updated.revision, updated.model_dump_json()),
+                    event_append = (
+                        state.revision > 0
+                        and updated.revision == state.revision + 1
+                        and len(updated.events) == len(state.events) + 1
+                        and updated.events[:-1] == state.events
+                        and updated.model_copy(update={"events": state.events, "revision": state.revision}) == state
                     )
+                    appended = False
+                    if event_append:
+                        # Append to the validated journal without serializing its unchanged history again.
+                        appended = (
+                            connection.execute(
+                                "UPDATE session_journals SET revision=?, "
+                                "payload=json_set(payload,'$.revision',?,'$.events[#]',json(?)) "
+                                "WHERE session_id=? AND json_type(payload,'$.events')='array'",
+                                (updated.revision, updated.revision, updated.events[-1].model_dump_json(), session_id),
+                            ).rowcount
+                            == 1
+                        )
+                    if not appended:
+                        connection.execute(
+                            "INSERT INTO session_journals(session_id,revision,payload) VALUES(?,?,?) "
+                            "ON CONFLICT(session_id) DO UPDATE SET revision=excluded.revision,payload=excluded.payload",
+                            (session_id, updated.revision, updated.model_dump_json()),
+                        )
                 return result
         except (OSError, sqlite3.Error) as error:
             raise SessionStorageError(f"Session transaction failed for {session_id}.") from error

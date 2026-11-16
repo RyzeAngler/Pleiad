@@ -17,8 +17,16 @@ from pleiad.agent.agent import Agent
 from pleiad.agent.errors import AgentConfigurationError
 from pleiad.agent.policy import AgentPolicyHints
 from pleiad.context.budget import ContextBudget
+from pleiad.context.errors import ContextCompactionError
 from pleiad.context.selection.models import ContextBlock
 from pleiad.contracts import CapabilityGrants, JsonObject, SkillRef, ToolRef
+from pleiad.events.context import (
+    ContextCompactionCancelledEvent,
+    ContextCompactionCompletedEvent,
+    ContextCompactionEvent,
+    ContextCompactionFailedEvent,
+    ContextCompactionStartedEvent,
+)
 from pleiad.events.contracts import Event
 from pleiad.events.message import MessageAbortedEvent
 from pleiad.events.runtime import ModelCompletedEvent, ModelStepCompletedEvent
@@ -36,6 +44,7 @@ from pleiad.observability.tracing import Observability
 from pleiad.orchestration.handoff.handoff import Handoff
 from pleiad.runtime.checkpoint import ResumeDecision
 from pleiad.runtime.errors import RuntimeStateError
+from pleiad.runtime.events import RunEvent
 from pleiad.runtime.execution.read_tool_result import ReadToolResultTool
 from pleiad.runtime.limits import RunLimits
 from pleiad.runtime.policy import HostPolicy, effective_policy
@@ -51,6 +60,7 @@ from pleiad.sessions.model_step import ModelStep
 from pleiad.sessions.records import RunStatus
 from pleiad.sessions.session import Session
 from pleiad.sessions.state import SessionState
+from pleiad.sessions.store import SessionStore
 from pleiad.sessions.writer import SessionWriter
 from pleiad.skills.contracts import SkillDescriptor
 from pleiad.skills.loader import SkillLoader
@@ -69,6 +79,7 @@ from tests.fakes.runtime import (
     FailingOpenAIModel,
     FakeAnthropicModel,
     FakeOpenAIModel,
+    RequestMessageCounter,
     anthropic_text_batch,
     anthropic_tool_batch,
     create_sandbox,
@@ -1150,6 +1161,216 @@ def test_event_journal_replays_more_than_one_page_without_blocking_execution(tmp
             assert [record.sequence for record in records] == list(range(1, len(records) + 1))
             replay = [record async for record in handle.events(after_sequence=records[255].sequence)]
             assert replay == records[256:]
+
+    asyncio.run(scenario())
+
+
+async def compaction_history(tmp_path: Path, store: SessionStore) -> tuple[Runner, Agent, Session]:
+    """Seed real Session history through three successful SDK Runs."""
+    model = FakeOpenAIModel(tuple(text_batch(f"answer-{index}", f"response-{index}") for index in range(4)))
+    runner, agent = make_runner(model, tmp_path, token_counter=RequestMessageCounter())
+    session = Session("compaction", store)
+    for index in range(3):
+        result = await run_agent(runner, agent, f"question-{index}", session=session)
+        assert result.state is RunStatus.SUCCEEDED
+    return runner, agent, session
+
+
+def compaction_limits() -> RunLimits:
+    """Select one recent complete Step from the seeded history."""
+    return RunLimits(context_budget=ContextBudget(window_tokens=40, output_reserve=2, compact_at=5, recent_tokens=3))
+
+
+async def history_summary(previous: str | None, steps: tuple[ModelStep, ...]) -> str:
+    """Return deterministic external summarizer output for integration scenarios."""
+    assert previous is None and len(steps) == 2
+    return "Earlier questions were answered."
+
+
+@pytest.mark.parametrize("persisted", [False, True], ids=["memory", "sqlite"])
+def test_compaction_events_are_durable_before_notification_and_replay_after_reopen(
+    tmp_path: Path, persisted: bool
+) -> None:
+    async def scenario() -> None:
+        database = tmp_path / "sessions.sqlite3"
+        store = SqliteSessionStore(database) if persisted else InMemorySessionStore()
+        runner, agent, session = await compaction_history(tmp_path, store)
+        runner.history_summarizer = history_summary
+        observed: list[ContextCompactionEvent] = []
+
+        async def observe(event: Event) -> None:
+            if isinstance(event, ContextCompactionEvent):
+                committed = await store.read_events(session.session_id, event.run_id)
+                assert committed[-1].event_id == event.event_id
+                assert committed[-1].data == event.model_dump(mode="json")
+                observed.append(event)
+
+        runner.event_sink = observe
+        handle = await start_agent(
+            runner, agent, "next", session=session, limits=compaction_limits(), parent_run_id="parent-run"
+        )
+        async with handle:
+            result = await handle.result()
+            records = [record async for record in handle.events()]
+        assert result.state is RunStatus.SUCCEEDED
+        assert len(observed) == 2
+        started, completed = observed
+        assert isinstance(started, ContextCompactionStartedEvent)
+        assert isinstance(completed, ContextCompactionCompletedEvent)
+        assert started.compaction_id == completed.compaction_id
+        assert started.step_id == completed.step_id == (await session.history())[-1].step_id
+        assert started.run_id == completed.run_id == handle.run_id
+        assert started.agent_name == completed.agent_name == agent.name
+        assert completed.parent_run_id == "parent-run"
+        assert completed.before.input_tokens == 7 and completed.after.input_tokens == 3
+        assert not completed.before.estimated and not completed.after.estimated
+        assert completed.summary is not None and len(completed.summary.added_steps) == 2
+        assert len(await session.history()) == 4
+        restored = SqliteSessionStore(database) if persisted else store
+        replay = await restored.read_events(session.session_id, handle.run_id)
+        assert [(record.sequence, record.data) for record in replay] == [
+            (record.sequence, record.event) for record in records
+        ]
+        compactions = [record for record in replay if record.kind.startswith("context.compaction.")]
+        assert [record.data for record in compactions] == [event.model_dump(mode="json") for event in observed]
+
+    asyncio.run(scenario())
+
+
+def test_compaction_failure_is_recorded_before_the_original_error_escapes(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        runner, agent, session = await compaction_history(tmp_path, InMemorySessionStore())
+
+        async def failing_summary(previous: str | None, steps: tuple[ModelStep, ...]) -> str:
+            assert previous is None and len(steps) == 2
+            raise RuntimeError("private provider diagnostic")
+
+        runner.history_summarizer = failing_summary
+        handle = await start_agent(runner, agent, "next", session=session, limits=compaction_limits())
+        async with handle:
+            with pytest.raises(ContextCompactionError) as failure:
+                await handle.result()
+            assert isinstance(failure.value.__cause__, RuntimeError)
+            records = [record async for record in handle.events()]
+        events = [record.event for record in records if str(record.event["kind"]).startswith("context.compaction.")]
+        assert [event["kind"] for event in events] == ["context.compaction.started", "context.compaction.failed"]
+        failed = ContextCompactionFailedEvent.model_validate(events[1])
+        assert failed.compaction_id == events[0]["compaction_id"]
+        assert failed.error_code == "context.compaction.failed"
+        assert failed.error_message == "Context compaction failed."
+        assert "after" not in events[1]
+        assert "private provider diagnostic" not in json.dumps(events)
+        snapshot = await session.store.run(session.session_id, handle.run_id)
+        assert snapshot.receipt is not None and snapshot.receipt.state == "failed"
+        assert records[-1].event["kind"] == "run.failed"
+
+    asyncio.run(scenario())
+
+
+def test_compaction_subscription_reconnect_observes_cancellation_without_owning_execution(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        runner, agent, session = await compaction_history(tmp_path, InMemorySessionStore())
+        entered, cleaned = asyncio.Event(), asyncio.Event()
+
+        async def blocking_summary(previous: str | None, steps: tuple[ModelStep, ...]) -> str:
+            assert previous is None and len(steps) == 2
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaned.set()
+            raise AssertionError("The summarizer must be cancelled")
+
+        runner.history_summarizer = blocking_summary
+        handle = await start_agent(runner, agent, "next", session=session, limits=compaction_limits())
+        async with handle:
+            await asyncio.wait_for(entered.wait(), timeout=3)
+            subscription = handle.events()
+            started: RunEvent | None = None
+            async for record in subscription:
+                if record.event["kind"] == "context.compaction.started":
+                    started = record
+                    break
+            await subscription.aclose()
+            assert started is not None and handle.task is not None and not handle.task.done()
+            connected = asyncio.Event()
+
+            async def reconnect() -> list[RunEvent]:
+                connected.set()
+                return [record async for record in handle.events(after_sequence=started.sequence)]
+
+            async with asyncio.TaskGroup() as observers:
+                replay = observers.create_task(reconnect())
+                await connected.wait()
+                result = await handle.cancel(reason="user_cancelled")
+            assert cleaned.is_set() and result.state is RunStatus.CANCELLED
+            events = [record.event for record in replay.result()]
+            cancelled = ContextCompactionCancelledEvent.model_validate(events[0])
+            assert cancelled.compaction_id == started.event["compaction_id"]
+            assert "rolling_summary" in cancelled.strategies_attempted
+            assert "rolling_summary" not in cancelled.strategies_completed
+            assert "after" not in events[0]
+            assert events[-1]["kind"] == "run.cancelled"
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("phase", ["started", "completed"])
+def test_cancelling_compaction_notification_preserves_its_single_committed_terminal(tmp_path: Path, phase: str) -> None:
+    async def scenario() -> None:
+        runner, agent, session = await compaction_history(tmp_path, SqliteSessionStore(tmp_path / "events.sqlite3"))
+        runner.history_summarizer = history_summary
+        notified = asyncio.Event()
+
+        async def observe(event: Event) -> None:
+            if event.kind == f"context.compaction.{phase}":
+                notified.set()
+                await asyncio.Event().wait()
+
+        runner.event_sink = observe
+        handle = await start_agent(runner, agent, "next", session=session, limits=compaction_limits())
+        async with handle:
+            await asyncio.wait_for(notified.wait(), timeout=3)
+            result = await handle.cancel(reason="cancel_notification")
+            records = [record async for record in handle.events()]
+        assert result.state is RunStatus.CANCELLED
+        events = [record.event for record in records if str(record.event["kind"]).startswith("context.compaction.")]
+        terminal_kind = "cancelled" if phase == "started" else "completed"
+        assert [event["kind"] for event in events] == [
+            "context.compaction.started",
+            f"context.compaction.{terminal_kind}",
+        ]
+        assert events[0]["compaction_id"] == events[1]["compaction_id"]
+        if phase == "started":
+            assert events[1]["duration_ms"] == 0
+
+    asyncio.run(scenario())
+
+
+def test_deadline_during_compaction_records_cancellation_and_preserves_run_timeout(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        runner, agent, session = await compaction_history(tmp_path, InMemorySessionStore())
+        entered = asyncio.Event()
+
+        async def blocking_summary(previous: str | None, steps: tuple[ModelStep, ...]) -> str:
+            assert previous is None and len(steps) == 2
+            entered.set()
+            await asyncio.Event().wait()
+            raise AssertionError("The deadline must cancel the summarizer")
+
+        runner.history_summarizer = blocking_summary
+        limits = compaction_limits().model_copy(update={"execution_timeout_seconds": 0.1})
+        handle = await start_agent(runner, agent, "next", session=session, limits=limits)
+        async with handle:
+            await asyncio.wait_for(entered.wait(), timeout=3)
+            result = await handle.result()
+            events = [record.event async for record in handle.events()]
+        assert isinstance(result, RunResult) and result.state is RunStatus.FAILED
+        assert result.receipt.reason == "timeout"
+        assert [event["kind"] for event in events if str(event["kind"]).startswith("context.compaction.")] == [
+            "context.compaction.started",
+            "context.compaction.cancelled",
+        ]
 
     asyncio.run(scenario())
 

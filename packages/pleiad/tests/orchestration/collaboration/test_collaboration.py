@@ -8,8 +8,9 @@ import pytest
 
 from pleiad.agent.agent import Agent
 from pleiad.budgets import BudgetLedger, BudgetStateError
-from pleiad.context.budget import ApproximateTokenCounter
+from pleiad.context.budget import ApproximateTokenCounter, ContextBudget
 from pleiad.contracts import ToolRef, UsageCharge
+from pleiad.events.context import ContextCompactionCompletedEvent, ContextCompactionStartedEvent
 from pleiad.messages.images import ImageBlock, ImageReadScope, ImageReference, ImageResolver, ResolvedImage
 from pleiad.messages.message import TextBlock
 from pleiad.models.errors import ModelConnectionError
@@ -43,6 +44,7 @@ from pleiad.runtime.runner import Runner
 from pleiad.sessions.backends.in_memory import InMemorySessionStore
 from pleiad.sessions.backends.sqlite import SqliteSessionStore
 from pleiad.sessions.input import InputEnvelope
+from pleiad.sessions.model_step import ModelStep
 from pleiad.sessions.session import Session
 from pleiad.sessions.store import SessionStore
 from pleiad.skills.loader import SkillLoader
@@ -50,7 +52,14 @@ from pleiad.tools.base import FunctionTool
 from pleiad.tools.contracts import ParentRunLimits, ToolContext, ToolDescriptor, ToolResult
 from pleiad.tools.registry import ToolRegistry
 from pleiad.tools.runtime import ToolRuntime
-from tests.fakes.runtime import EchoArguments, FakeOpenAIModel, interrupting_tool, text_batch, tool_batch
+from tests.fakes.runtime import (
+    EchoArguments,
+    FakeOpenAIModel,
+    RequestMessageCounter,
+    interrupting_tool,
+    text_batch,
+    tool_batch,
+)
 from tests.runtime.execution.test_multimodal import IMAGE_BYTES, image_reference
 from tests.runtime_support import run_agent
 
@@ -111,6 +120,7 @@ class Harness:
         self.bindings: dict[str, WorkBinding] = {}
         self.admissions: list[str] = []
         self.revoked = False
+        self.run_limits = RunLimits(max_model_steps=4, max_output_tokens=128)
         self.extra_tools = extra_tools
         self.image_resolver = image_resolver
         self.sessions = InMemorySessionStore() if sessions is None else sessions
@@ -153,7 +163,7 @@ class Harness:
             WorkPermit(
                 authorization_ref=proposal.work_id,
                 binding_key=binding.binding_key,
-                limits=RunLimits(max_model_steps=4, max_output_tokens=128),
+                limits=self.run_limits,
             ),
             binding,
         )
@@ -279,6 +289,79 @@ def test_idle_followup_reuses_session_and_starts_a_new_invocation() -> None:
             assert second.route == "new_work" and a.run_id != b.run_id
             assert a.proposal.session_id == b.proposal.session_id
             assert len(await group.session(first.member_id).history()) == 2
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("persistent", [False, True], ids=["memory", "sqlite"])
+def test_child_compaction_progress_keeps_typed_metadata_and_deduplicates_replay(
+    tmp_path: Path, persistent: bool
+) -> None:
+    async def scenario() -> None:
+        database = tmp_path / "collaboration.sqlite3"
+        sessions = SqliteSessionStore(tmp_path / "sessions.sqlite3") if persistent else InMemorySessionStore()
+        store = SqliteCollaborationStore(database) if persistent else InMemoryCollaborationStore()
+        model = FakeOpenAIModel(tuple(text_batch(f"answer-{index}", f"response-{index}") for index in range(4)))
+        harness = Harness((model,), sessions=sessions, store=store)
+        async with harness.group as group:
+            await group.root.open_run("root-run")
+            first = await group.root.spawn(spawn_request(), authority())
+            assert first.work_id is not None
+            await terminal(group.root, first.member_id, first.work_id)
+            for index in range(2):
+                follow = await group.root.followup(
+                    MessageRequest(request_id=f"seed-{index}", member_id=first.member_id, content=envelope("next")),
+                    authority(),
+                )
+                assert follow.work_id is not None
+                await terminal(group.root, first.member_id, follow.work_id)
+            binding = harness.bindings[first.member_id]
+            binding.runner.token_counter = RequestMessageCounter()
+
+            async def summarize(previous: str | None, steps: tuple[ModelStep, ...]) -> str:
+                assert previous is None and len(steps) == 2
+                return "Earlier questions were answered."
+
+            binding.runner.history_summarizer = summarize
+            harness.run_limits = RunLimits(
+                max_model_steps=4,
+                max_output_tokens=128,
+                context_budget=ContextBudget(window_tokens=40, output_reserve=2, compact_at=5, recent_tokens=3),
+            )
+            follow = await group.root.followup(
+                MessageRequest(request_id="compact", member_id=first.member_id, content=envelope("next")), authority()
+            )
+            assert follow.work_id is not None
+            work = await terminal(group.root, first.member_id, follow.work_id)
+            assert work.run_id is not None and work.receipt is not None and work.receipt.state == "succeeded"
+            page = await group.root.wait(
+                (first.member_id,), after=EventCursor(scope_id=group.state.scope_id), timeout_seconds=0
+            )
+            projected = tuple(event for event in page.events if event.compaction is not None)
+            assert len(projected) == 2
+            started, completed = projected
+            assert isinstance(started.compaction, ContextCompactionStartedEvent)
+            assert isinstance(completed.compaction, ContextCompactionCompletedEvent)
+            assert started.compaction.compaction_id == completed.compaction.compaction_id
+            assert started.kind == "run.context.compaction.started"
+            assert completed.kind == "run.context.compaction.completed"
+            assert completed.run_id == completed.compaction.run_id == work.run_id
+            assert completed.compaction.parent_run_id == "root-run"
+            assert completed.compaction.agent_name == "worker"
+            assert completed.step_id == completed.compaction.step_id
+            assert completed.compaction.summary is not None
+            assert [step.sequence for step in completed.compaction.summary.added_steps] == [1, 2]
+            original = await sessions.read_events(work.proposal.session_id, work.run_id)
+            source = next(record for record in original if record.sequence == completed.source_sequence)
+            assert completed.compaction.model_dump(mode="json") == source.data
+            before = group.state.events
+            await group.replay_progress(follow.work_id, work.run_id)
+            assert group.state.events == before
+            restored = SqliteCollaborationStore(database) if persistent else store
+            snapshot = await restored.read(group.state.scope_id)
+            assert snapshot is not None
+            assert tuple(event for event in snapshot.events if event.compaction is not None) == projected
+            assert len(model.requests) == 4
 
     asyncio.run(scenario())
 

@@ -5,9 +5,12 @@ import hashlib
 import json
 from uuid import NAMESPACE_URL, uuid5
 
+from pydantic import TypeAdapter
+
 from pleiad.budgets import BudgetLedger
 from pleiad.contracts import JsonObject, UsageCharge
 from pleiad.errors.base import PleiadError
+from pleiad.events.context import ContextCompactionLifecycleEvent
 from pleiad.limits import expired
 from pleiad.messages.results import ResultReference
 from pleiad.models.errors import (
@@ -57,6 +60,8 @@ from pleiad.sessions.recovery import ActionEvidence
 from pleiad.sessions.session import Session
 from pleiad.sessions.store import SessionStore, complete_owned
 from pleiad.tools.contracts import ToolContext
+
+compaction_event_adapter: TypeAdapter[ContextCompactionLifecycleEvent] = TypeAdapter(ContextCompactionLifecycleEvent)
 
 
 def stable_id(*parts: str) -> str:
@@ -737,17 +742,29 @@ class CollaborationGroup:
             return
         work = self.state.works[work_id]
         kind = data.get("kind")
-        if isinstance(kind, str) and kind in {
-            "step.started",
-            "step.completed",
-            "message.completed",
-            "tool.started",
-            "tool.completed",
-            "tool.interrupted",
-            "run.failed",
-            "run.cancelled",
-            "run.paused",
-        }:
+        compaction = None
+        if kind in (
+            "context.compaction.started",
+            "context.compaction.completed",
+            "context.compaction.failed",
+            "context.compaction.cancelled",
+        ):
+            compaction = compaction_event_adapter.validate_python(data)
+        if isinstance(kind, str) and (
+            compaction is not None
+            or kind
+            in {
+                "step.started",
+                "step.completed",
+                "message.completed",
+                "tool.started",
+                "tool.completed",
+                "tool.interrupted",
+                "run.failed",
+                "run.cancelled",
+                "run.paused",
+            }
+        ):
             step = data.get("step_id")
             event = CollaborationEvent(
                 sequence=len(self.state.events) + 1,
@@ -759,6 +776,7 @@ class CollaborationGroup:
                 run_id=run_id,
                 source_sequence=sequence,
                 step_id=step if isinstance(step, str) else None,
+                compaction=compaction,
             )
             self.state = self.state.model_copy(update={"events": (*self.state.events, event)})
         await self.project_inputs(work.proposal.member_id)

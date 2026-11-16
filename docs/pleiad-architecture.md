@@ -30,7 +30,13 @@ SessionStore 保存已经发生的交互，Context 为当前模型请求选择�
 
 动态 ContextBlock 在每次模型请求中渲染，检查点保存已接受的引用快照。SessionStore 保存原始消息与完整工具观察，Context 的选择、压缩只影响请求视图。Runtime 为当前 Session writer 绑定 `read_tool_result`，模型按 message_id 分页读取原 ToolMessage，按 operation_id 分页读取持久 OperationRecord 的最终结果。两种事实保留各自身份，完整观察不因输入或请求视图的大小限制而丢失。读取范围与授权由宿主绑定的 Session 决定，包括该 Session 的历史 Run。
 
-请求视图保留含图片的完整 ModelStep，再选择最近历史，最后裁剪仍无法容纳的可选 ContextBlock。摘要只覆盖可移除的连续历史前缀。图片与当前输入超出窗口时明确失败。结果引用替换只记录真实原文引用，未使用摘要器时 CompactionState.summary 为 null。宿主提供过真实滚动摘要后，新历史继续并入该摘要需要显式更新器。
+请求视图保留含图片的完整 ModelStep，再选择最近历史，最后裁剪仍无法容纳的可选 ContextBlock。摘要覆盖被省略的完整文本步骤，可以跨越仍然保留的图片步骤，因此覆盖范围可能不连续。图片与当前输入超出窗口时明确失败。结果引用替换只记录真实原文引用，未使用摘要器时 CompactionState.summary 为 null。宿主提供过真实滚动摘要后，新历史继续并入该摘要需要显式更新器。
+
+ContextCompactor 在确认存在实际压缩动作后，经 Runtime 注入的事件上下文发布 `context.compaction.started/completed/failed/cancelled`。普通预算检查、无实际动作、单独复用摘要和常规超大工具结果引用化不产生这些事件。每轮事件由 compaction_id 关联，run_id、step_id、agent_name 指向当前请求，子 Run 同时携带真实 parent_run_id。事件继续通过 Runner 的 SessionWriter.emit → 持久化日志 → RunHandle.notify → event_sink 链路；已接收的压缩事件提交与唤醒在传播取消前完成，应用通知本身仍可取消。终态通知不属于压缩执行的异常处理范围，已提交 completed 不会因通知取消再变成 cancelled。
+
+终态记录实际尝试与完成的策略阶段及单调时钟工作耗时，不计事件通知等待。completed 记录压缩前后各自的 token 数、estimated、图片计量缺失、保留与省略的步骤、工具引用身份、ContextBlock 原始位置与来源，以及真实摘要游标和本轮新增覆盖的步骤。游标只是高水位，不能作为连续覆盖证明。事件不复制历史与摘要正文；失败或取消没有最终请求时不提供 after 和最终范围。失败保留安全错误信息与原异常因果链，取消继续传播；压缩期间的截止时间取消不改变 Run 的 timeout 结果。
+
+RunHandle.events(after_sequence=...) 和 SessionStore.read_events 读取同一有序日志，支持实时订阅、断开续读与历史重放；订阅者不拥有执行。SubagentGroup 的子 Runner 使用同一契约；CollaborationGroup 将类型化源事件存入 CollaborationEvent.compaction，保留 source_sequence，并沿用原游标去重。存储错误明确传播，进程崩溃留下的 started 保持结果未知，不补造终态。工具事件与原始 Session 历史独立保留。
 
 图片通过 `ImageReference` 固定宿主身份和内容摘要，`ImageBlock` 与文本块有序混排。Session 保存引用，Runner 在每次模型请求前通过宿主异步 resolver 重新授权、解析和校验。物理大小限制与图片 token 估计分别执行，未知 token 估计默认拒绝提交。独立 `ImageClient` 供图片工具调用，提供生成、参考编辑及原结果下载恢复。模型客户端的非密钥绑定指纹进入 Agent 恢复校验。公共契约、职责、失败处理和验收方案见 [多模态架构方案](pleiad-multimodal-design.md)。
 
